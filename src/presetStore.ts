@@ -12,7 +12,7 @@ export const PRESETS_FILE = path.join(PRESETS_DIR, 'presets.jsonc');
 const FORMATTING: FormattingOptions = { insertSpaces: true, tabSize: 2, eol: '\n' };
 
 /** Written when the file does not exist yet: documentation and a commented-out example. */
-const INITIAL_CONTENT = `// Band composite presets for the TIFF viewer extension for VS Code.
+const INITIAL_CONTENT = `// Band composite presets for the TIFF Viewer VS Code extension.
 //
 // Presets appear in the viewer's "Bands" menu. Write them here, or use
 // "Save as preset…" in the viewer's Composite panel (it edits this file and
@@ -75,7 +75,7 @@ export class PresetStore implements vscode.Disposable {
       };
       this.disposables.push(watcher, watcher.onDidChange(schedule), watcher.onDidCreate(schedule), watcher.onDidDelete(schedule));
     })().catch((error) => {
-      void vscode.window.showWarningMessage(`TIFF viewer: cannot use the presets file ${PRESETS_FILE}: ${errorText(error)}`);
+      void vscode.window.showWarningMessage(`TIFF Viewer VS Code: cannot use the presets file ${PRESETS_FILE}: ${errorText(error)}`);
     });
     return this.ready;
   }

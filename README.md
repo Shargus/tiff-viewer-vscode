@@ -1,8 +1,8 @@
-# TIFF viewer
+# TIFF Viewer VS Code
 
 View **TIFF**, **BigTIFF** and **GeoTIFF** images directly in VS Code, including files far larger than memory, with band composites for multi-band imagery such as Sentinel-1 and Sentinel-2.
 
-This extension is built on [**TIFF/BigTIFF**](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), which provides the viewer at its core: the fast, on-demand rendering of huge TIFF and BigTIFF files. TIFF viewer started as a fork of it and adds tools for working with GeoTIFFs. See [Credits](#credits).
+This extension is built on [**TIFF/BigTIFF**](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), which provides the viewer at its core: the fast, on-demand rendering of huge TIFF and BigTIFF files. TIFF Viewer VS Code started as a fork of it and adds tools for working with GeoTIFFs. See [Credits](#credits).
 
 Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the viewer.
 
@@ -130,7 +130,7 @@ git push --follow-tags
 
 ## Credits
 
-TIFF viewer is a fork of [TIFF/BigTIFF](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), and most of what makes it work is their design and code. Many thanks to kiu-chan for building it and releasing it under the MIT licence.
+TIFF Viewer VS Code is a fork of [TIFF/BigTIFF](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), and most of what makes it work is their design and code. Many thanks to kiu-chan for building it and releasing it under the MIT licence.
 
 From kiu-chan's TIFF/BigTIFF (version 0.1.0):
 
@@ -141,7 +141,7 @@ From kiu-chan's TIFF/BigTIFF (version 0.1.0):
 - contrast stretching, NoData transparency, the pixel readout and the info panel;
 - the pyramid-of-tiles icon.
 
-Added in TIFF viewer:
+Added in TIFF Viewer VS Code:
 
 - band composites and band math, colour maps, and presets kept in `~/.tiff-viewer-vscode/presets.jsonc`;
 - band names from GDAL band descriptions;

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "TIFF viewer band composite presets",
+  "title": "TIFF Viewer VS Code band composite presets",
   "description": "Presets shown in the viewer's Bands menu.",
   "oneOf": [
     {

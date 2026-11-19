@@ -2,7 +2,7 @@
 
 ## 0.2.0
 
-- Renamed to **TIFF viewer** (`tiff-viewer-vscode`): a separate extension built on [TIFF/BigTIFF](https://github.com/kiu-chan/tiff-bigtiff) 0.1.0 by kiu-chan, whose release notes follow below. The viewer's ID is now `tiffViewer.viewer`: update any `workbench.editorAssociations` entry that names `tiffBigtiff.viewer`.
+- Renamed to **TIFF Viewer VS Code** (`tiff-viewer-vscode`): a separate extension built on [TIFF/BigTIFF](https://github.com/kiu-chan/tiff-bigtiff) 0.1.0 by kiu-chan, whose release notes follow below. The viewer's ID is now `tiffViewer.viewer`: update any `workbench.editorAssociations` entry that names `tiffBigtiff.viewer`.
 
 - **Band composites** for multi-band imagery (Sentinel-2, Sentinel-1, …): choose a preset from the **Bands** menu, or open the **Composite** panel (<kbd>B</kbd>) to write an expression per red/green/blue channel (`B04 / 3000`), or a single expression with a colour map (`(B08 - B04) / (B08 + B04)` with RdYlGn). Per-channel display ranges or automatic stretching, gamma, and the computed values in the pixel readout.
 - **Presets**: built-in Sentinel-2 (true colour, false colour, SWIR, NDVI, NDWI) and Sentinel-1 (VV/VH in dB or linear power) presets; save your own from the panel. Your presets live in `~/.tiff-viewer-vscode/presets.jsonc`, created on first start with documentation, editable by hand (with completion and validation), and reloaded when it changes; command **TIFF: Open Band Composite Presets File**. Presets can apply automatically by band count and/or file name. The viewer remembers the choice made for each file.
