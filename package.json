@@ -1,23 +1,28 @@
 {
-  "name": "tiff-bigtiff",
-  "displayName": "TIFF/BigTIFF",
-  "description": "View TIFF and BigTIFF images in VS Code: multi-page, tiled, pyramidal (COG), 1–64-bit, float data, and LZW / Deflate / JPEG / ZSTD / WebP / LERC / PackBits / CCITT fax compression.",
+  "name": "tiff-viewer-vscode",
+  "displayName": "TIFF viewer",
+  "description": "View TIFF, BigTIFF and GeoTIFF images in VS Code, including files far larger than memory: band composites and band math for multi-band imagery (Sentinel-1, Sentinel-2) with presets, multi-page, tiled, pyramidal (COG), 1–64-bit and float data, and LZW / Deflate / JPEG / ZSTD / WebP / LERC / PackBits / CCITT fax compression.",
   "version": "0.1.0",
-  "publisher": "monlycute",
+  "publisher": "shargus",
   "author": {
-    "name": "kiu-chan",
-    "email": "baokhanhntby@gmail.com"
+    "name": "Shargus"
   },
+  "contributors": [
+    {
+      "name": "kiu-chan",
+      "url": "https://github.com/kiu-chan"
+    }
+  ],
   "license": "MIT",
   "icon": "images/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kiu-chan/tiff-bigtiff.git"
+    "url": "https://github.com/Shargus/tiff-viewer-vscode.git"
   },
   "bugs": {
-    "url": "https://github.com/kiu-chan/tiff-bigtiff/issues"
+    "url": "https://github.com/Shargus/tiff-viewer-vscode/issues"
   },
-  "homepage": "https://github.com/kiu-chan/tiff-bigtiff#readme",
+  "homepage": "https://github.com/Shargus/tiff-viewer-vscode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -33,7 +38,15 @@
     "cog",
     "image",
     "viewer",
-    "preview"
+    "preview",
+    "sentinel",
+    "remote sensing",
+    "satellite",
+    "band composite",
+    "ndvi"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "capabilities": {
@@ -45,8 +58,8 @@
   "contributes": {
     "customEditors": [
       {
-        "viewType": "tiffBigtiff.viewer",
-        "displayName": "TIFF/BigTIFF Viewer",
+        "viewType": "tiffViewer.viewer",
+        "displayName": "TIFF viewer",
         "selector": [
           {
             "filenamePattern": "*.tif"
@@ -72,24 +85,41 @@
         ],
         "priority": "default"
       }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": [
+          "**/.tiff-viewer-vscode/presets.jsonc"
+        ],
+        "url": "./schemas/presets.schema.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tiffViewer.openPresets",
+        "title": "Open Band Composite Presets File",
+        "category": "TIFF"
+      }
     ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . --noEmit && tsc -p src/webview --noEmit",
-    "test": "npm run build && node test/decode.test.mjs",
+    "test": "npm run build && node test/decode.test.mjs && node test/composite.test.mjs && node test/presetStore.test.mjs",
     "vscode:prepublish": "npm run typecheck && node esbuild.mjs --production",
     "package": "vsce package",
     "publish:vsce": "vsce publish",
-    "publish:ovsx": "npx --yes ovsx publish"
+    "publish:ovsx": "ovsx publish"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
     "@types/vscode": "^1.85.0",
-    "@vscode/vsce": "^4.0.0",
+    "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.28.2",
     "geotiff": "^3.0.5",
+    "jsonc-parser": "^3.3.1",
+    "ovsx": "^1.4.0",
     "typescript": "^5.9.3"
   }
 }

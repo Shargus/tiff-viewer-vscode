@@ -1,9 +1,15 @@
+import type { CompositeSpec } from '../shared/presets';
 import type { ByteRange, MainToWorker, TileSpec, ToneMode, WorkerToMain } from '../shared/protocol';
+import { channelStats, compileComposite, compositeKey, compositeSamples, compositeToRGBA, type ChannelStats } from './composite';
+import { DecodePool, serveDecodes } from './decodePool';
 import { MessageSource } from './messageSource';
 import {
   CancelledError,
   chooseLevel,
   computeStats,
+  readStatsSample,
+  registerDecoders,
+  setDecodePool,
   openTiff,
   readPixel,
   readRegion,
@@ -48,6 +54,7 @@ interface Job {
   generation: number;
   page: number;
   tone: ToneMode;
+  composite?: CompositeSpec;
   spec: TileSpec;
   cancelled: boolean;
   /** Set while the tile is not wanted; the job waits before its next batch. */
@@ -75,8 +82,8 @@ const rawCache = new Map<string, RegionResult>();
 let rawCacheBytes = 0;
 const RAW_CACHE_BYTES = 128 * 1024 * 1024;
 
-function rawKey(page: number, spec: TileSpec): string {
-  return `${page}|${spec.window.join(',')}|${spec.outWidth}x${spec.outHeight}`;
+function rawKey(page: number, spec: TileSpec, samples: number[]): string {
+  return `${page}|${samples.join(',')}|${spec.window.join(',')}|${spec.outWidth}x${spec.outHeight}`;
 }
 
 function rawGet(key: string): RegionResult | undefined {
@@ -147,6 +154,7 @@ function pump(): void {
       generation: wanted.generation,
       page: wanted.page,
       tone: wanted.tone,
+      composite: wanted.composite,
       spec,
       cancelled: false,
       paused: false,
@@ -170,14 +178,11 @@ function pump(): void {
   }
 }
 
-/** Longest side of the overview used for contrast statistics, and the most tiles it may read. */
-const STATS_SIZE = 512;
-const STATS_MAX_TILES = 4096;
 const statsReady = new Map<number, Promise<void>>();
 
 /**
  * Contrast stretching needs statistics of the whole page, not of each tile,
- * so that tiles match. They come from an overview that reads few tiles.
+ * so that tiles match. They come from an overview or a sample of tiles.
  */
 function ensureStats(tiff: OpenedTiff, index: number): Promise<void> {
   const page = tiff.pages[index];
@@ -186,25 +191,32 @@ function ensureStats(tiff: OpenedTiff, index: number): Promise<void> {
   }
   let ready = statsReady.get(index);
   if (!ready) {
-    ready = (async () => {
-      const { width, height } = page.info;
-      let size = Math.min(STATS_SIZE, Math.max(width, height));
-      for (;;) {
-        const w = Math.max(1, Math.round((width * size) / Math.max(width, height)));
-        const h = Math.max(1, Math.round((height * size) / Math.max(width, height)));
-        const { image, window } = chooseLevel(page, [0, 0, width, height], w);
-        const across = Math.min(w, Math.ceil(image.getWidth() / image.getTileWidth()));
-        const down = Math.min(h, Math.ceil(image.getHeight() / image.getTileHeight()));
-        if (across * down <= STATS_MAX_TILES || size <= 32) {
-          const region = await readRegion(page, image, window, w, h);
-          page.stats = computeStats(page, region.data);
-          return;
-        }
-        size /= 2;
-      }
-    })();
+    ready = readStatsSample(page).then((data) => {
+      page.stats = computeStats(page, data);
+    });
     ready.catch(() => statsReady.delete(index));
     statsReady.set(index, ready);
+  }
+  return ready;
+}
+
+const compositeStats = new Map<string, Promise<ChannelStats[]>>();
+
+/** Per-channel statistics of a composite over the whole page, when a range is stretched automatically. */
+function ensureCompositeStats(tiff: OpenedTiff, index: number, composite: CompositeSpec): Promise<ChannelStats[] | undefined> {
+  if (composite.ranges.every((range) => range)) {
+    return Promise.resolve(undefined);
+  }
+  const key = `${index}|${compositeKey({ ...composite, ranges: [], colormap: '', gamma: 1 })}`;
+  let ready = compositeStats.get(key);
+  if (!ready) {
+    const page = tiff.pages[index];
+    const compiled = compileComposite(composite);
+    ready = readStatsSample(page, compositeSamples(compiled)).then((data) =>
+      channelStats(compiled.evaluate(data, data[0]?.length ?? 0, page.info.noData)),
+    );
+    ready.catch(() => compositeStats.delete(key));
+    compositeStats.set(key, ready);
   }
   return ready;
 }
@@ -219,26 +231,35 @@ async function renderTile(job: Job): Promise<void> {
   if (page.info.unsupported) {
     throw new Error(page.info.unsupported);
   }
-  await ensureStats(tiff, job.page);
+  const { composite } = job;
+  const compiled = composite && compileComposite(composite);
+  const samples = compiled ? compositeSamples(compiled) : page.samples;
+  const stats = composite ? await ensureCompositeStats(tiff, job.page, composite) : await ensureStats(tiff, job.page);
   const { outWidth, outHeight } = spec;
   const send = (data: RegionResult['data'], rows: number, final: boolean) => {
     if (job.cancelled) {
       throw new CancelledError();
     }
-    const rgba = toRGBA(page, data, rows * outWidth, job.tone, new Uint8ClampedArray(outWidth * outHeight * 4));
+    const n = rows * outWidth;
+    const out = new Uint8ClampedArray(outWidth * outHeight * 4);
+    const rgba =
+      composite && compiled
+        ? compositeToRGBA(composite, compiled.evaluate(data, n, page.info.noData), n, job.tone, stats || undefined, out)
+        : toRGBA(page, data, n, job.tone, out);
     post(
       { type: 'tile', generation, id: spec.id, width: outWidth, height: outHeight, rgba: rgba.buffer as ArrayBuffer, final },
       [rgba.buffer as ArrayBuffer],
     );
   };
 
-  const key = rawKey(job.page, spec);
+  const key = rawKey(job.page, spec, samples);
   let region = rawGet(key);
   if (!region) {
     const { image, window } = chooseLevel(page, spec.window, outWidth);
     let lastProgress = 0;
     let lastSnapshot = Date.now() - SNAPSHOT_INTERVAL_MS + FIRST_SNAPSHOT_MS;
     region = await readRegion(page, image, window, outWidth, outHeight, {
+      samples,
       isCancelled: () => job.cancelled,
       waitTurn: () =>
         job.paused && !job.cancelled
@@ -292,7 +313,12 @@ async function handlePixel(message: Extract<MainToWorker, { type: 'pixel' }>): P
     const tiff = await opened!;
     const page = tiff.pages[message.page];
     const values = page && !page.info.unsupported ? await readPixel(page, message.x, message.y) : null;
-    post({ type: 'pixel', reqId: message.reqId, x: message.x, y: message.y, values });
+    let computed: number[] | undefined;
+    if (values && message.composite) {
+      const compiled = compileComposite(message.composite);
+      computed = compiled.evaluate(compositeSamples(compiled).map((s) => [values[s]]), 1, page.info.noData).map((v) => v[0]);
+    }
+    post({ type: 'pixel', reqId: message.reqId, x: message.x, y: message.y, values, computed });
   } catch {
     post({ type: 'pixel', reqId: message.reqId, x: message.x, y: message.y, values: null });
   } finally {
@@ -310,6 +336,12 @@ async function handlePixel(message: Extract<MainToWorker, { type: 'pixel' }>): P
 scope.onmessage = (event) => {
   const message = event.data;
   switch (message.type) {
+    case 'decoders':
+      setDecodePool(new DecodePool(message.ports as MessagePort[]));
+      break;
+    case 'helper':
+      serveDecodes(message.port as MessagePort, registerDecoders);
+      break;
     case 'open': {
       const source = new MessageSource(message.fileSize, requestBytes);
       opened = openTiff(source);

@@ -8,6 +8,8 @@
  * webview relays the request to the extension host, which reads the file.
  */
 
+import type { CompositeSpec, Preset } from './presets';
+
 export interface ByteRange {
   offset: number;
   length: number;
@@ -22,15 +24,32 @@ export type ToneMode = 'minmax' | 'percentile' | 'full';
 // Extension host <-> webview
 // ---------------------------------------------------------------------------
 
+/** What the viewer shows for a file: the plain image, a saved preset, or an unsaved composite. */
+export type Selection = { kind: 'none' } | { kind: 'preset'; name: string } | { kind: 'custom'; preset: Preset };
+
 export type HostToWebview =
-  | { type: 'init'; fileName: string; fileSize: number }
+  | {
+      type: 'init';
+      fileName: string;
+      fileSize: number;
+      /** User presets from the presets file. */
+      presets: Preset[];
+      /** Last selection for this file, if any. */
+      remembered?: Selection;
+    }
+  | { type: 'presets'; presets: Preset[]; select?: string }
   | { type: 'readResult'; id: number; data: Uint8Array[] }
   | { type: 'readError'; id: number; message: string }
   | { type: 'reload'; fileSize: number };
 
 export type WebviewToHost =
   | { type: 'ready' }
-  | { type: 'read'; id: number; ranges: ByteRange[] };
+  | { type: 'read'; id: number; ranges: ByteRange[] }
+  /** Asks for a name (and auto-apply rule) and stores the preset in the presets file. */
+  | { type: 'savePreset'; preset: Preset; bandCount: number }
+  | { type: 'deletePreset'; name: string }
+  | { type: 'remember'; selection: Selection }
+  | { type: 'openPresetsFile' };
 
 // ---------------------------------------------------------------------------
 // Webview <-> worker
@@ -66,8 +85,10 @@ export interface PageInfo {
   toneAdjustable: boolean;
   /** Whether "full range" makes sense (integer data). */
   fullRangeAvailable: boolean;
-  /** Label of each sample, e.g. R, G, B, A. */
+  /** Label of each sample, e.g. R, G, B, A, or the band description. */
   sampleLabels: string[];
+  /** Band descriptions from GDAL metadata (e.g. "B04", "VV"), null where absent. */
+  bandNames: (string | null)[];
   /** Human readable tag list for the info panel. */
   tags: [string, string][];
   /** Decoding problem detected up front (e.g. unsupported compression). */
@@ -90,7 +111,14 @@ export interface TileSpec {
   outHeight: number;
 }
 
+/** A DOM MessagePort (this file is also compiled for the extension host, without DOM types). */
+export type Port = { postMessage(message: unknown, transfer?: unknown[]): void };
+
 export type MainToWorker =
+  /** Ports to helper workers that decode tiles in parallel (see decodePool.ts). */
+  | { type: 'decoders'; ports: Port[] }
+  /** Turns this worker into a decode helper serving requests on `port`. */
+  | { type: 'helper'; port: Port }
   | { type: 'open'; fileSize: number }
   | { type: 'readResult'; id: number; data: ArrayBuffer[] }
   | { type: 'readError'; id: number; message: string }
@@ -104,9 +132,11 @@ export type MainToWorker =
       generation: number;
       page: number;
       tone: ToneMode;
+      /** Band composite to render instead of the image's own colours. */
+      composite?: CompositeSpec;
       tiles: TileSpec[];
     }
-  | { type: 'pixel'; reqId: number; page: number; x: number; y: number };
+  | { type: 'pixel'; reqId: number; page: number; x: number; y: number; composite?: CompositeSpec };
 
 export type WorkerToMain =
   | { type: 'read'; id: number; ranges: ByteRange[] }
@@ -124,4 +154,12 @@ export type WorkerToMain =
       final: boolean;
     }
   | { type: 'tileError'; generation: number; id: string; message: string }
-  | { type: 'pixel'; reqId: number; x: number; y: number; values: number[] | null };
+  | {
+      type: 'pixel';
+      reqId: number;
+      x: number;
+      y: number;
+      values: number[] | null;
+      /** Values of the composite's expressions at the pixel. */
+      computed?: number[];
+    };

@@ -1,9 +1,23 @@
+import { COLORMAP_NAMES } from '../shared/colormaps';
+import { bandIdentifier as bandIdentifierOf, compileExpressions, ExpressionError } from '../shared/expression';
+import {
+  allPresets,
+  bandVariables,
+  compositeSpec,
+  presetExpressions,
+  presetMatches,
+  presetRanges,
+  type CompositeSpec,
+  type Preset,
+  type Range,
+} from '../shared/presets';
 import type {
   FileInfo,
   HostToWebview,
   MainToWorker,
   PageInfo,
   PixelWindow,
+  Selection,
   TileSpec,
   ToneMode,
   WebviewToHost,
@@ -109,21 +123,47 @@ function postToWorker(message: MainToWorker, transfer: Transferable[] = []): voi
 // Worker lifecycle
 // ---------------------------------------------------------------------------
 
+/** Helper workers that decode tiles in parallel for the decoder worker. */
+let helpers: Worker[] = [];
+const HELPER_COUNT = Math.max(0, Math.min(6, (navigator.hardwareConcurrency || 2) - 1));
+
 async function createWorker(): Promise<Worker> {
   // Webview resources are cross-origin for Worker(), so start it from a blob URL.
   const response = await fetch(window.TIFF_WORKER_URL);
   const code = await response.text();
   const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
   const w = new Worker(url);
-  URL.revokeObjectURL(url);
   w.onmessage = (event: MessageEvent<WorkerToMain>) => void onWorkerMessage(event.data);
   w.onerror = (event) => showMessage(`Decoder error: ${event.message}`);
+  // Same script, started as decode helpers, each connected to the decoder worker by a channel.
+  const ports: MessagePort[] = [];
+  try {
+    for (let i = 0; i < HELPER_COUNT; i++) {
+      const helper = new Worker(url);
+      const channel = new MessageChannel();
+      helper.postMessage({ type: 'helper', port: channel.port1 } satisfies MainToWorker, [channel.port1]);
+      helpers.push(helper);
+      ports.push(channel.port2);
+    }
+  } catch {
+    // Decoding then happens in the decoder worker alone.
+  }
+  URL.revokeObjectURL(url);
+  if (ports.length) {
+    w.postMessage({ type: 'decoders', ports } satisfies MainToWorker, ports);
+  }
   return w;
 }
 
-async function start(fileSize: number): Promise<void> {
+function stopWorkers(): void {
   worker?.terminate();
   worker = undefined;
+  helpers.forEach((helper) => helper.terminate());
+  helpers = [];
+}
+
+async function start(fileSize: number): Promise<void> {
+  stopWorkers();
   info = undefined;
   clearTiles();
   showMessage(undefined);
@@ -195,7 +235,7 @@ async function onWorkerMessage(message: WorkerToMain): Promise<void> {
       break;
     case 'pixel':
       if (message.reqId === pixelReq) {
-        statusValue.textContent = formatValues(message.values);
+        statusValue.textContent = formatValues(message.values, message.computed);
       }
       break;
   }
@@ -284,13 +324,16 @@ function selectPage(index: number, keepView = false): void {
   clearTiles();
   showMessage(undefined);
 
-  toneGroup.hidden = !page.toneAdjustable;
-  const fullOption = toneSelect.querySelector<HTMLOptionElement>('option[value="full"]')!;
-  fullOption.hidden = !page.fullRangeAvailable;
-  if (tone === 'full' && !page.fullRangeAvailable) {
-    tone = 'minmax';
+  if (!selectionResolved) {
+    selectionResolved = true;
+    applySelection(initialSelection(page), false);
+  } else {
+    // The band count may differ between pages; resolve the composite again.
+    applySelection(selection, false);
   }
-  toneSelect.value = tone;
+  presetGroup.hidden = !!page.unsupported;
+  compositeToggle.hidden = !!page.unsupported;
+  updateToneControls();
 
   statusSize.textContent = `${page.width} × ${page.height}`;
   renderInfo();
@@ -305,6 +348,20 @@ function selectPage(index: number, keepView = false): void {
     showProgress(0, 'Loading');
   }
   layout(0);
+}
+
+/** Shows the Contrast selector when something is stretched automatically, and its valid choices. */
+function updateToneControls(): void {
+  const page = currentPage();
+  if (!page) return;
+  const stretched = composite ? composite.ranges.some((range) => !range) : page.toneAdjustable;
+  toneGroup.hidden = !stretched;
+  const fullAvailable = !composite && page.fullRangeAvailable;
+  toneSelect.querySelector<HTMLOptionElement>('option[value="full"]')!.hidden = !fullAvailable;
+  if (tone === 'full' && !fullAvailable) {
+    tone = 'minmax';
+  }
+  toneSelect.value = tone;
 }
 
 function setTone(value: ToneMode): void {
@@ -445,7 +502,7 @@ function updateTiles(): void {
     list.map((spec) => [spec.id, previous.get(spec.id) ?? { done: 0, total: Math.max(1, estimate(page, spec).tiles) }]),
   );
   updateProgress();
-  postToWorker({ type: 'tiles', generation, page: pageIndex, tone, tiles: list });
+  postToWorker({ type: 'tiles', generation, page: pageIndex, tone, composite, tiles: list });
 }
 
 function updateProgress(): void {
@@ -577,7 +634,7 @@ function draw(): void {
         t.window[3] > visible[1],
     )
     .sort((a, b) => b.z - a.z || a.generation - b.generation);
-  if (page.hasAlpha) {
+  if (hasTransparency(page)) {
     const [x0, y0, x1, y1] = deviceRect(page, [0, 0, page.width, page.height]);
     ctx.fillStyle = checkerPattern();
     ctx.fillRect(Math.max(0, x0), Math.max(0, y0), Math.min(width, x1) - Math.max(0, x0), Math.min(height, y1) - Math.max(0, y0));
@@ -586,6 +643,10 @@ function draw(): void {
     tile.used = ++drawCounter;
     drawTile(page, tile, width, height);
   }
+}
+
+function hasTransparency(page: PageInfo): boolean {
+  return page.hasAlpha || !!composite;
 }
 
 /** Canvas (device pixel) rectangle of an image window, with edges rounded so that tiles meet exactly. */
@@ -618,7 +679,7 @@ function drawTile(page: PageInfo, tile: DisplayTile, width: number, height: numb
   const sy0 = ((cy0 - y0) / (y1 - y0)) * bh;
   const sx1 = ((cx1 - x0) / (x1 - x0)) * bw;
   const sy1 = ((cy1 - y0) / (y1 - y0)) * bh;
-  if (page.hasAlpha && tile.final) {
+  if (hasTransparency(page) && tile.final) {
     // Do not let coarser tiles show through transparent pixels.
     ctx.clearRect(cx0, cy0, cx1 - cx0, cy1 - cy0);
     ctx.fillStyle = checkerPattern();
@@ -657,15 +718,20 @@ function formatNumber(value: number): string {
   return Number(value.toPrecision(6)).toString();
 }
 
-function formatValues(values: number[] | null): string {
+function formatValues(values: number[] | null, computed?: number[]): string {
   const page = currentPage();
   if (!values || !page) {
     return '';
   }
-  if (values.length === 1) {
-    return `${page.sampleLabels[0]}: ${formatNumber(values[0])}`;
+  let text =
+    values.length === 1
+      ? `${page.sampleLabels[0]}: ${formatNumber(values[0])}`
+      : values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${formatNumber(v)}`).join('  ');
+  if (computed?.length) {
+    const labels = computed.length === 3 ? ['R', 'G', 'B'] : [''];
+    text = `${computed.map((v, i) => `${labels[i]}${labels[i] ? ' ' : ''}${formatNumber(v)}`).join('  ')}   ←   ${text}`;
   }
-  return values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${formatNumber(v)}`).join('  ');
+  return text;
 }
 
 function formatBytes(bytes: number): string {
@@ -828,11 +894,11 @@ function updatePointerReadout(event: MouseEvent): void {
   }
   statusPos.textContent = `x ${x}, y ${y}`;
   pixelReq = ++requestCounter;
-  postToWorker({ type: 'pixel', reqId: pixelReq, page: pageIndex, x, y });
+  postToWorker({ type: 'pixel', reqId: pixelReq, page: pageIndex, x, y, composite });
 }
 
 document.addEventListener('keydown', (event) => {
-  if (event.target instanceof HTMLSelectElement || event.altKey) {
+  if (event.target instanceof HTMLSelectElement || event.target instanceof HTMLInputElement || event.altKey) {
     return;
   }
   const mod = event.ctrlKey || event.metaKey;
@@ -864,6 +930,11 @@ document.addEventListener('keydown', (event) => {
     case 'I':
       if (mod) handled = false;
       else toggleInfo();
+      break;
+    case 'b':
+    case 'B':
+      if (mod || compositeToggle.hidden) handled = false;
+      else toggleComposite();
       break;
     case 'ArrowLeft':
     case 'ArrowRight':
@@ -907,6 +978,392 @@ new ResizeObserver(() => layout()).observe(stage);
 new MutationObserver(() => draw()).observe(document.body, { attributes: true, attributeFilter: ['class'] });
 
 // ---------------------------------------------------------------------------
+// Band composites
+// ---------------------------------------------------------------------------
+
+const presetGroup = $<HTMLLabelElement>('presetGroup');
+const presetSelect = $<HTMLSelectElement>('preset');
+const compositeToggle = $<HTMLButtonElement>('compositeToggle');
+const compositePanel = $<HTMLElement>('composite');
+const channelsBox = $<HTMLDivElement>('channels');
+const colormapRow = $<HTMLDivElement>('colormapRow');
+const colormapSelect = $<HTMLSelectElement>('colormap');
+const gammaInput = $<HTMLInputElement>('gamma');
+const compositeError = $<HTMLDivElement>('compositeError');
+const deleteButton = $<HTMLButtonElement>('deletePreset');
+const bandList = $<HTMLDivElement>('bandList');
+
+/** Presets from the presets file. */
+let userPresets: Preset[] = [];
+/** What was shown for this file last time (from the extension host). */
+let remembered: Selection | undefined;
+let selection: Selection = { kind: 'none' };
+let selectionResolved = false;
+/** The composite being rendered; undefined shows the image's own colours. */
+let composite: CompositeSpec | undefined;
+/** The preset in the editor. Its name, bands and match rule carry over from the selected preset. */
+let editing: Preset = { name: '' };
+interface ChannelRow {
+  expression: HTMLInputElement;
+  min: HTMLInputElement;
+  max: HTMLInputElement;
+}
+let rows: ChannelRow[] = [];
+let lastExpression: HTMLInputElement | undefined;
+let editTimer: ReturnType<typeof setTimeout> | undefined;
+
+for (const name of COLORMAP_NAMES) {
+  for (const value of [name, `${name}_r`]) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value === name ? name : `${name} (reversed)`;
+    colormapSelect.append(option);
+  }
+}
+
+function findPreset(name: string): { preset: Preset; builtin: boolean } | undefined {
+  return allPresets(userPresets, currentPage()?.samplesPerPixel ?? 0).find((p) => p.preset.name === name);
+}
+
+function initialSelection(page: PageInfo): Selection {
+  if (remembered && (remembered.kind !== 'preset' || findPreset(remembered.name))) {
+    return remembered;
+  }
+  const match = allPresets(userPresets, page.samplesPerPixel).find((p) => presetMatches(p.preset, fileName, page.samplesPerPixel));
+  return match ? { kind: 'preset', name: match.preset.name } : { kind: 'none' };
+}
+
+/** A starting point for a new composite: the first three bands, or the first band, by their names in the file. */
+function defaultPreset(page: PageInfo): Preset {
+  const name = (i: number) => {
+    const description = page.bandNames[i];
+    return (description && bandIdentifierOf(description)) || `b${i + 1}`;
+  };
+  return page.samplesPerPixel >= 3
+    ? { name: '', red: name(0), green: name(1), blue: name(2), range: 'auto' }
+    : { name: '', value: name(0), range: 'auto', colormap: 'gray' };
+}
+
+/** Shows `next` (a preset, an unsaved composite or the plain image) and fills the editor with it. */
+function applySelection(next: Selection, remember: boolean): void {
+  const page = currentPage();
+  if (!page) return;
+  let preset: Preset | undefined;
+  if (next.kind === 'preset') {
+    preset = findPreset(next.name)?.preset;
+    if (!preset) next = { kind: 'none' };
+  } else if (next.kind === 'custom') {
+    preset = next.preset;
+  }
+  selection = next;
+  editing = structuredClone(preset ?? defaultPreset(page));
+  fillEditor();
+  updatePresetSelect();
+  if (remember) {
+    vscode.postMessage({ type: 'remember', selection });
+  }
+  if (!preset) {
+    setComposite(undefined);
+    showCompositeError(undefined);
+    return;
+  }
+  const spec = compositeSpec(preset, page.samplesPerPixel, page.bandNames);
+  const error = validate(spec);
+  if (error) {
+    // Show the plain image, and why the preset does not apply.
+    setComposite(undefined);
+    showCompositeError(error.message, error.index);
+    showComposite(true);
+  } else {
+    showCompositeError(undefined);
+    setComposite(spec);
+  }
+}
+
+function validate(spec: CompositeSpec): { message: string; index?: number } | undefined {
+  try {
+    compileExpressions(spec.expressions, spec.bands);
+    return undefined;
+  } catch (error) {
+    const index = (error as { index?: number }).index;
+    const channel = spec.expressions.length === 3 && index !== undefined ? `${['Red', 'Green', 'Blue'][index]}: ` : '';
+    return { message: channel + (error instanceof ExpressionError ? error.message : String(error)), index };
+  }
+}
+
+function setComposite(spec: CompositeSpec | undefined): void {
+  if (JSON.stringify(spec ?? null) === JSON.stringify(composite ?? null)) {
+    return;
+  }
+  composite = spec;
+  updateToneControls();
+  // Like a tone change: keep the tiles on screen until replaced.
+  generation++;
+  requested = new Map();
+  lastRequest = '';
+  failed.clear();
+  draw();
+  scheduleTiles(0);
+}
+
+function updatePresetSelect(): void {
+  const page = currentPage();
+  const options: HTMLElement[] = [];
+  const option = (value: string, text: string) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = text;
+    return o;
+  };
+  options.push(option('none', page && page.samplesPerPixel > 1 ? 'Image colours' : 'Image'));
+  const presets = allPresets(userPresets, page?.samplesPerPixel ?? 0);
+  for (const [label, builtin] of [['My presets', false], ['Built-in', true]] as const) {
+    const group = document.createElement('optgroup');
+    group.label = label;
+    group.append(...presets.filter((p) => p.builtin === builtin).map((p) => option(`preset:${p.preset.name}`, p.preset.name)));
+    if (group.childElementCount) options.push(group);
+  }
+  if (selection.kind === 'custom') {
+    options.push(option('custom', editing.name ? `${editing.name} (modified)` : 'Custom'));
+  }
+  presetSelect.replaceChildren(...options);
+  presetSelect.value = selection.kind === 'preset' ? `preset:${selection.name}` : selection.kind;
+  const user = selection.kind === 'preset' && findPreset(selection.name)?.builtin === false;
+  deleteButton.disabled = !user;
+  deleteButton.title = user ? `Delete "${(selection as { name: string }).name}" from the presets file` : 'Built-in presets cannot be deleted';
+}
+
+function isRgb(): boolean {
+  return compositePanel.querySelector<HTMLInputElement>('input[name="mode"]:checked')!.value === 'rgb';
+}
+
+function formatRangeValue(value: number | undefined): string {
+  return value === undefined ? '' : String(value);
+}
+
+/** Writes `editing` into the editor fields. */
+function fillEditor(): void {
+  const expressions = presetExpressions(editing);
+  const ranges = presetRanges(editing, expressions.length);
+  const rgb = expressions.length === 3;
+  compositePanel.querySelector<HTMLInputElement>(`input[name="mode"][value="${rgb ? 'rgb' : 'single'}"]`)!.checked = true;
+  buildRows(rgb);
+  rows.forEach((row, i) => {
+    row.expression.value = expressions[i];
+    row.min.value = formatRangeValue(ranges[i]?.[0]);
+    row.max.value = formatRangeValue(ranges[i]?.[1]);
+  });
+  colormapRow.hidden = rgb;
+  colormapSelect.value = COLORMAP_NAMES.includes((editing.colormap ?? 'gray').replace(/_r$/, '')) ? (editing.colormap ?? 'gray') : 'gray';
+  gammaInput.value = String(editing.gamma ?? 1);
+  renderBandList();
+}
+
+function buildRows(rgb: boolean): void {
+  const labels = rgb ? [['R', 'r', 'Red'], ['G', 'g', 'Green'], ['B', 'b', 'Blue']] : [['V', '', 'Value']];
+  channelsBox.querySelectorAll('.row-cell').forEach((cell) => cell.remove());
+  rows = labels.map(([short, cls, long]) => {
+    const label = document.createElement('span');
+    label.className = `row-cell channel-label ${cls}`;
+    label.textContent = short;
+    label.title = long;
+    const input = (type: string, className: string, placeholder: string, title: string) => {
+      const el = document.createElement('input');
+      el.type = type;
+      el.className = `row-cell ${className}`;
+      el.placeholder = placeholder;
+      el.title = title;
+      el.spellcheck = false;
+      el.setAttribute('aria-label', title);
+      el.addEventListener('input', onEdit);
+      return el;
+    };
+    const row = {
+      expression: input('text', 'expression', 'e.g. B04 / 3000', `${long} expression`),
+      min: input('number', 'range', 'auto', `${long}: value shown as black`),
+      max: input('number', 'range', 'auto', `${long}: value shown at full brightness`),
+    };
+    row.expression.addEventListener('focus', () => (lastExpression = row.expression));
+    channelsBox.append(label, row.expression, row.min, row.max);
+    return row;
+  });
+  lastExpression = rows[0].expression;
+}
+
+function renderBandList(): void {
+  const page = currentPage();
+  if (!page) return;
+  const vars = bandVariables(page.samplesPerPixel, page.bandNames, editing.bands);
+  const names: string[][] = Array.from({ length: page.samplesPerPixel }, () => []);
+  for (const [name, index] of Object.entries(vars)) names[index].push(name);
+  bandList.replaceChildren(
+    ...names.map((list, i) => {
+      // Prefer the file's name for the band (B04, VV), then a preset's, then b4.
+      const described = page.bandNames[i] ? list.find((n) => vars[n] === i && n !== `b${i + 1}` && n === bandIdentifierOf(page.bandNames[i]!)) : undefined;
+      const primary = described ?? list.find((n) => n !== `b${i + 1}`) ?? `b${i + 1}`;
+      const button = document.createElement('button');
+      const index = document.createElement('span');
+      index.className = 'index';
+      index.textContent = String(i + 1);
+      button.append(index, primary);
+      button.title = `Band ${i + 1}: ${list.join(', ')}`;
+      button.addEventListener('click', () => insertBand(primary));
+      return button;
+    }),
+  );
+}
+
+function insertBand(name: string): void {
+  const input = lastExpression ?? rows[0]?.expression;
+  if (!input) return;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  input.setRangeText(name, start, end, 'end');
+  input.focus();
+  onEdit();
+}
+
+/** Reads the editor fields into a preset, or returns an error message. */
+function readEditor(): { preset: Preset } | { error: string; field?: HTMLInputElement } {
+  const preset: Preset = { name: editing.name };
+  if (editing.bands) preset.bands = editing.bands;
+  if (editing.match) preset.match = editing.match;
+  const expressions = rows.map((row) => row.expression.value.trim());
+  if (isRgb()) {
+    [preset.red, preset.green, preset.blue] = expressions;
+  } else {
+    preset.value = expressions[0];
+    preset.colormap = colormapSelect.value;
+  }
+  const ranges: (Range | 'auto')[] = [];
+  for (const row of rows) {
+    const lo = row.min.value.trim();
+    const hi = row.max.value.trim();
+    if (!lo && !hi) {
+      ranges.push('auto');
+    } else if (!lo || !hi || !Number.isFinite(Number(lo)) || !Number.isFinite(Number(hi))) {
+      return { error: 'Give both a minimum and a maximum, or leave both empty to stretch automatically.', field: lo ? row.max : row.min };
+    } else {
+      ranges.push([Number(lo), Number(hi)]);
+    }
+  }
+  const same = ranges.every((r) => JSON.stringify(r) === JSON.stringify(ranges[0]));
+  if (same && ranges[0] === 'auto') preset.range = 'auto';
+  else if (same && JSON.stringify(ranges[0]) !== '[0,1]') preset.range = ranges[0];
+  else if (!same) preset.range = ranges;
+  const gamma = Number(gammaInput.value);
+  if (gammaInput.value.trim() && (!Number.isFinite(gamma) || gamma <= 0)) {
+    return { error: 'Gamma must be a positive number.', field: gammaInput };
+  }
+  if (gammaInput.value.trim() && gamma !== 1) preset.gamma = gamma;
+  return { preset };
+}
+
+function showCompositeError(message: string | undefined, index?: number, field?: HTMLInputElement): void {
+  compositeError.hidden = !message;
+  compositeError.textContent = message ?? '';
+  for (const el of compositePanel.querySelectorAll('input')) el.removeAttribute('aria-invalid');
+  const invalid = field ?? (index !== undefined ? rows[index]?.expression : undefined);
+  invalid?.setAttribute('aria-invalid', 'true');
+}
+
+/** Any change in the editor: validate, then show it (debounced) as an unsaved composite. */
+function onEdit(): void {
+  clearTimeout(editTimer);
+  editTimer = setTimeout(() => {
+    const page = currentPage();
+    if (!page) return;
+    const result = readEditor();
+    if ('error' in result) {
+      showCompositeError(result.error, undefined, result.field);
+      return;
+    }
+    const spec = compositeSpec(result.preset, page.samplesPerPixel, page.bandNames);
+    const error = validate(spec);
+    if (error) {
+      showCompositeError(error.message, error.index);
+      return;
+    }
+    showCompositeError(undefined);
+    editing = result.preset;
+    selection = { kind: 'custom', preset: result.preset };
+    updatePresetSelect();
+    vscode.postMessage({ type: 'remember', selection });
+    setComposite(spec);
+  }, 300);
+}
+
+function showComposite(show: boolean): void {
+  compositePanel.hidden = !show;
+  compositeToggle.setAttribute('aria-pressed', String(show));
+  if (show) renderBandList();
+}
+
+function toggleComposite(): void {
+  showComposite(compositePanel.hidden);
+  if (!compositePanel.hidden) (lastExpression ?? rows[0]?.expression)?.focus();
+}
+
+compositeToggle.addEventListener('click', toggleComposite);
+presetSelect.addEventListener('change', () => {
+  const value = presetSelect.value;
+  if (value === 'custom') return;
+  applySelection(value === 'none' ? { kind: 'none' } : { kind: 'preset', name: value.slice('preset:'.length) }, true);
+});
+for (const radio of compositePanel.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
+  radio.addEventListener('change', () => {
+    // Keep the expressions (one becomes the red channel, or red becomes the
+    // single one); ranges start again at 0–1, since they rarely carry over (NDVI's -1…1).
+    const expressions = rows.map((row) => row.expression.value);
+    const rgb = isRgb();
+    buildRows(rgb);
+    colormapRow.hidden = rgb;
+    rows.forEach((row, i) => {
+      row.expression.value = rgb ? (expressions[i] ?? expressions[0]) : expressions[0];
+      row.min.value = '0';
+      row.max.value = '1';
+    });
+    onEdit();
+  });
+}
+colormapSelect.addEventListener('change', onEdit);
+gammaInput.addEventListener('input', onEdit);
+$('saveComposite').addEventListener('click', () => {
+  const result = readEditor();
+  const page = currentPage();
+  if ('error' in result || !page) {
+    if ('error' in result) showCompositeError(result.error, undefined, result.field);
+    return;
+  }
+  const error = validate(compositeSpec(result.preset, page.samplesPerPixel, page.bandNames));
+  if (error) {
+    showCompositeError(error.message, error.index);
+    return;
+  }
+  vscode.postMessage({ type: 'savePreset', preset: withUsedBandNames(result.preset, page), bandCount: page.samplesPerPixel });
+});
+
+/**
+ * Keeps only the preset band names the expressions use and the file does not
+ * provide itself, so that a saved preset does not carry a built-in's whole layout.
+ */
+function withUsedBandNames(preset: Preset, page: PageInfo): Preset {
+  if (!preset.bands) return preset;
+  const used = new Set(presetExpressions(preset).flatMap((e) => e.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []));
+  const fromFile = bandVariables(page.samplesPerPixel, page.bandNames);
+  const bands = Object.fromEntries(Object.entries(preset.bands).filter(([name]) => used.has(name) && !(name in fromFile)));
+  const { bands: _, ...rest } = preset;
+  return Object.keys(bands).length ? { ...rest, bands } : rest;
+}
+deleteButton.addEventListener('click', () => {
+  if (selection.kind === 'preset') vscode.postMessage({ type: 'deletePreset', name: selection.name });
+});
+$('openSettings').addEventListener('click', (event) => {
+  event.preventDefault();
+  vscode.postMessage({ type: 'openPresetsFile' });
+});
+
+// ---------------------------------------------------------------------------
 // Extension host messages
 // ---------------------------------------------------------------------------
 
@@ -915,7 +1372,15 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
   switch (message.type) {
     case 'init':
       fileName = message.fileName;
+      userPresets = message.presets;
+      remembered = message.remembered;
       void start(message.fileSize);
+      break;
+    case 'presets':
+      userPresets = message.presets;
+      if (currentPage()) {
+        applySelection(message.select ? { kind: 'preset', name: message.select } : selection, !!message.select);
+      }
       break;
     case 'reload':
       void start(message.fileSize);

@@ -1,0 +1,352 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TIFF viewer band composite presets",
+  "description": "Presets shown in the viewer's Bands menu.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "presets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "anyOf": [
+              {
+                "required": [
+                  "red"
+                ]
+              },
+              {
+                "required": [
+                  "green"
+                ]
+              },
+              {
+                "required": [
+                  "blue"
+                ]
+              },
+              {
+                "required": [
+                  "value"
+                ]
+              }
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Name shown in the Bands menu. A preset named like a built-in one replaces it."
+              },
+              "red": {
+                "type": "string",
+                "description": "Red channel expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+              },
+              "green": {
+                "type": "string",
+                "description": "Green channel expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+              },
+              "blue": {
+                "type": "string",
+                "description": "Blue channel expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+              },
+              "value": {
+                "type": "string",
+                "description": "Single-band (shown with `colormap`); used when red/green/blue are absent expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+              },
+              "range": {
+                "markdownDescription": "Expression values shown from black to full brightness: `[min, max]` for all channels, one `[min, max]` (or `\"auto\"`) per channel, or `\"auto\"` to stretch with the viewer's Contrast setting. Default `[0, 1]`.",
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "auto"
+                    ]
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "number"
+                          },
+                          "minItems": 2,
+                          "maxItems": 2
+                        },
+                        {
+                          "type": "string",
+                          "enum": [
+                            "auto"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              "colormap": {
+                "type": "string",
+                "enum": [
+                  "gray",
+                  "viridis",
+                  "magma",
+                  "inferno",
+                  "plasma",
+                  "turbo",
+                  "RdYlGn",
+                  "RdBu",
+                  "Spectral",
+                  "terrain",
+                  "gray_r",
+                  "viridis_r",
+                  "magma_r",
+                  "inferno_r",
+                  "plasma_r",
+                  "turbo_r",
+                  "RdYlGn_r",
+                  "RdBu_r",
+                  "Spectral_r",
+                  "terrain_r"
+                ],
+                "default": "gray",
+                "description": "Colour map for a single-band expression (`_r` reverses it)."
+              },
+              "gamma": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "default": 1,
+                "description": "Gamma applied after scaling to the range; above 1 brightens."
+              },
+              "bands": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "markdownDescription": "Extra band names for files without band descriptions: name → 1-based band number, e.g. `{ \"B04\": 4, \"B08\": 8 }`."
+              },
+              "match": {
+                "type": "object",
+                "markdownDescription": "Apply the preset automatically to files that match all given conditions (the first matching preset wins; a choice made in the viewer overrides it for that file).",
+                "properties": {
+                  "bands": {
+                    "oneOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "integer"
+                        }
+                      }
+                    ],
+                    "description": "Number of bands."
+                  },
+                  "fileName": {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    ],
+                    "description": "File name pattern(s): * matches any text, ? one character; case-insensitive."
+                  }
+                }
+              }
+            }
+          },
+          "description": "Band composite presets."
+        }
+      },
+      "required": [
+        "presets"
+      ]
+    },
+    {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "red"
+            ]
+          },
+          {
+            "required": [
+              "green"
+            ]
+          },
+          {
+            "required": [
+              "blue"
+            ]
+          },
+          {
+            "required": [
+              "value"
+            ]
+          }
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name shown in the Bands menu. A preset named like a built-in one replaces it."
+          },
+          "red": {
+            "type": "string",
+            "description": "Red channel expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+          },
+          "green": {
+            "type": "string",
+            "description": "Green channel expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+          },
+          "blue": {
+            "type": "string",
+            "description": "Blue channel expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+          },
+          "value": {
+            "type": "string",
+            "description": "Single-band (shown with `colormap`); used when red/green/blue are absent expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
+          },
+          "range": {
+            "markdownDescription": "Expression values shown from black to full brightness: `[min, max]` for all channels, one `[min, max]` (or `\"auto\"`) per channel, or `\"auto\"` to stretch with the viewer's Contrast setting. Default `[0, 1]`.",
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "auto"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    {
+                      "type": "string",
+                      "enum": [
+                        "auto"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "colormap": {
+            "type": "string",
+            "enum": [
+              "gray",
+              "viridis",
+              "magma",
+              "inferno",
+              "plasma",
+              "turbo",
+              "RdYlGn",
+              "RdBu",
+              "Spectral",
+              "terrain",
+              "gray_r",
+              "viridis_r",
+              "magma_r",
+              "inferno_r",
+              "plasma_r",
+              "turbo_r",
+              "RdYlGn_r",
+              "RdBu_r",
+              "Spectral_r",
+              "terrain_r"
+            ],
+            "default": "gray",
+            "description": "Colour map for a single-band expression (`_r` reverses it)."
+          },
+          "gamma": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "default": 1,
+            "description": "Gamma applied after scaling to the range; above 1 brightens."
+          },
+          "bands": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "markdownDescription": "Extra band names for files without band descriptions: name → 1-based band number, e.g. `{ \"B04\": 4, \"B08\": 8 }`."
+          },
+          "match": {
+            "type": "object",
+            "markdownDescription": "Apply the preset automatically to files that match all given conditions (the first matching preset wins; a choice made in the viewer overrides it for that file).",
+            "properties": {
+              "bands": {
+                "oneOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    }
+                  }
+                ],
+                "description": "Number of bands."
+              },
+              "fileName": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ],
+                "description": "File name pattern(s): * matches any text, ? one character; case-insensitive."
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

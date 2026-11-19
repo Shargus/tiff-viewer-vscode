@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as vscode from 'vscode';
-import type { ByteRange, HostToWebview, WebviewToHost } from './shared/protocol';
+import { PRESETS_FILE, type PresetStore } from './presetStore';
+import type { Preset } from './shared/presets';
+import type { ByteRange, HostToWebview, Selection, WebviewToHost } from './shared/protocol';
 
 /** Largest single read served to the webview (protects against corrupt byte counts). */
 const MAX_READ_BYTES = 512 * 1024 * 1024;
@@ -96,12 +98,12 @@ class TiffDocument implements vscode.CustomDocument {
 }
 
 export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<TiffDocument> {
-  static readonly viewType = 'tiffBigtiff.viewer';
+  static readonly viewType = 'tiffViewer.viewer';
 
-  static register(context: vscode.ExtensionContext): vscode.Disposable {
+  static register(context: vscode.ExtensionContext, presets: PresetStore): vscode.Disposable {
     return vscode.window.registerCustomEditorProvider(
       TiffEditorProvider.viewType,
-      new TiffEditorProvider(context.extensionUri),
+      new TiffEditorProvider(context.extensionUri, context.workspaceState, presets),
       {
         supportsMultipleEditorsPerDocument: true,
         // Decoding large images is expensive; keep the result when the tab is hidden.
@@ -110,7 +112,12 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
     );
   }
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    /** Remembers the composite shown for each file. */
+    private readonly state: vscode.Memento,
+    private readonly presets: PresetStore,
+  ) {}
 
   async openCustomDocument(uri: vscode.Uri): Promise<TiffDocument> {
     const document = new TiffDocument(uri);
@@ -131,14 +138,38 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
 
     const post = (message: HostToWebview) => webview.postMessage(message);
     const fileName = document.uri.path.slice(document.uri.path.lastIndexOf('/') + 1);
+    const rememberKey = `selection:${document.uri.toString()}`;
 
     const disposables: vscode.Disposable[] = [];
     disposables.push(
       webview.onDidReceiveMessage(async (message: WebviewToHost) => {
         switch (message.type) {
           case 'ready':
-            await document.open().catch(() => undefined);
-            void post({ type: 'init', fileName, fileSize: document.size });
+            await Promise.all([document.open().catch(() => undefined), this.presets.init()]);
+            void post({
+              type: 'init',
+              fileName,
+              fileSize: document.size,
+              presets: this.presets.get(),
+              remembered: this.state.get<Selection>(rememberKey),
+            });
+            break;
+          case 'remember':
+            // Only explicit choices are sent, so a choice of the plain image also overrides auto-apply rules.
+            void this.state.update(rememberKey, message.selection);
+            break;
+          case 'savePreset': {
+            const name = await savePreset(this.presets, message.preset, message.bandCount, fileName);
+            if (name) {
+              void post({ type: 'presets', presets: this.presets.get(), select: name });
+            }
+            break;
+          }
+          case 'deletePreset':
+            await deletePreset(this.presets, message.name);
+            break;
+          case 'openPresetsFile':
+            void this.presets.open();
             break;
           case 'read':
             try {
@@ -151,6 +182,8 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
         }
       }),
       document.onDidChange(() => void post({ type: 'reload', fileSize: document.size })),
+      // Edits of the presets file, by hand or from another viewer or window.
+      this.presets.onDidChange((presets) => void post({ type: 'presets', presets })),
     );
     panel.onDidDispose(() => disposables.forEach((d) => d.dispose()));
   }
@@ -199,6 +232,11 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
         <option value="full">Full range</option>
       </select>
     </label>
+    <label class="group" id="presetGroup" hidden title="Band composite preset">
+      <span>Bands</span>
+      <select id="preset"></select>
+    </label>
+    <button id="compositeToggle" hidden title="Edit the band composite (B)" aria-pressed="false">Composite</button>
     <span class="spacer"></span>
     <button id="infoToggle" title="Image information (I)" aria-pressed="false">Info</button>
   </div>
@@ -208,7 +246,37 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <div id="progress" hidden><div id="progressBar"></div></div>
       <div id="message" hidden></div>
     </div>
-    <aside id="info" hidden></aside>
+    <aside id="composite" class="panel" hidden>
+      <h3>Band composite</h3>
+      <div class="mode" role="radiogroup" aria-label="Composite type">
+        <label><input type="radio" name="mode" value="rgb" checked> RGB</label>
+        <label><input type="radio" name="mode" value="single"> Single band</label>
+      </div>
+      <div id="channels" class="channels">
+        <span></span><span class="col">Expression</span><span class="col">Min</span><span class="col">Max</span>
+      </div>
+      <div class="field" id="colormapRow" hidden>
+        <span>Colour map</span><select id="colormap"></select>
+      </div>
+      <div class="field">
+        <span>Gamma</span><input id="gamma" type="number" min="0.1" max="10" step="0.1" value="1">
+      </div>
+      <p class="hint">Leave min and max empty to stretch automatically (see Contrast).</p>
+      <div id="compositeError" class="error" role="alert" hidden></div>
+      <div class="buttons">
+        <button id="saveComposite" title="Save these settings as a preset">Save as preset…</button>
+        <button id="deletePreset" title="Delete the selected preset from the presets file">Delete preset</button>
+      </div>
+      <h3>Bands</h3>
+      <p class="hint">Click a band to insert it into the expression being edited.</p>
+      <div id="bandList" class="band-list"></div>
+      <h3>Expressions</h3>
+      <p class="hint">Operators <code>+ - * / ^ %</code>, comparisons <code>&lt; &gt; ==</code> (1 or 0), and
+      <code>abs sqrt exp log log10 log2 min max clamp pow where isnan round floor ceil</code>.
+      Example: <code>(B08 - B04) / (B08 + B04)</code>.</p>
+      <p class="hint"><a href="#" id="openSettings">Open the presets file</a> (<code>~/.tiff-viewer-vscode/presets.jsonc</code>)</p>
+    </aside>
+    <aside id="info" class="panel" hidden></aside>
   </div>
   <div id="status">
     <span id="statusSize"></span>
@@ -222,6 +290,65 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
 </body>
 </html>`;
   }
+}
+
+/**
+ * Asks for a name and an auto-apply rule, then stores the preset in the
+ * presets file (replacing one of the same name). Returns the name, or undefined if cancelled.
+ */
+async function savePreset(store: PresetStore, preset: Preset, bandCount: number, fileName: string): Promise<string | undefined> {
+  const existing = store.get();
+  const name = (
+    await vscode.window.showInputBox({
+      title: 'Save band composite preset',
+      prompt: 'Preset name. A preset with the same name is replaced.',
+      value: preset.name,
+      validateInput: (value) => (value.trim() ? undefined : 'Enter a name'),
+    })
+  )?.trim();
+  if (!name) return undefined;
+
+  const pattern = suggestPattern(fileName);
+  type Rule = vscode.QuickPickItem & { match?: Preset['match'] | 'pattern' };
+  const rules: Rule[] = [
+    { label: 'Only when chosen', description: 'Select it from the Bands menu', match: undefined },
+    { label: `Files with ${bandCount} band${bandCount === 1 ? '' : 's'}`, description: 'Apply automatically when opened', match: { bands: bandCount } },
+    { label: 'Files whose name matches…', description: `A pattern such as ${pattern}`, match: 'pattern' },
+  ];
+  const previous = existing.find((p) => p.name === name)?.match ?? preset.match;
+  if (previous) {
+    rules.unshift({ label: 'Keep the current rule', description: JSON.stringify(previous), match: previous });
+  }
+  const rule = await vscode.window.showQuickPick(rules, { title: `Apply "${name}" automatically?`, placeHolder: 'Choose when to apply the preset' });
+  if (!rule) return undefined;
+  let match = rule.match;
+  if (match === 'pattern') {
+    const glob = await vscode.window.showInputBox({
+      title: `Apply "${name}" to files named like`,
+      prompt: 'File name pattern; * matches any text, ? one character. Case does not matter.',
+      value: pattern,
+      validateInput: (value) => (value.trim() ? undefined : 'Enter a pattern'),
+    });
+    if (!glob) return undefined;
+    match = { fileName: glob.trim(), bands: bandCount };
+  }
+
+  const saved: Preset = { ...preset, name };
+  delete saved.match;
+  if (match) saved.match = match;
+  return (await store.save(saved)) ? name : undefined;
+}
+
+async function deletePreset(store: PresetStore, name: string): Promise<void> {
+  const answer = await vscode.window.showWarningMessage(`Delete the preset "${name}" from ${PRESETS_FILE}?`, { modal: true }, 'Delete');
+  if (answer === 'Delete') {
+    await store.delete(name);
+  }
+}
+
+/** A file name pattern from a name: numbers and dates become wildcards (S2A_20190926_T18NWL.tif → S2A_*_T*NWL.tif). */
+function suggestPattern(fileName: string): string {
+  return fileName.replace(/\d{2,}/g, '*').replace(/\*([^A-Za-z]*\*)+/g, '*');
 }
 
 function createNonce(): string {

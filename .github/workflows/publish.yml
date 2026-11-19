@@ -1,0 +1,128 @@
+# Builds, tests and publishes the extension to the Visual Studio Marketplace
+# and Open VSX when a version tag is pushed:
+#
+#   npm version patch        # or minor / major: bumps package.json and creates the tag
+#   git push --follow-tags
+#
+# Visual Studio Marketplace: Trusted Publishing (no stored token). It needs a
+# policy on https://marketplace.visualstudio.com/manage → publisher "shargus" →
+# Trusted Publishing, with repository owner "Shargus", repository
+# "tiff-viewer-vscode", workflow "publish.yml" and no environment.
+#
+# Open VSX: an access token from https://open-vsx.org/user-settings/tokens,
+# stored as the repository secret OVSX_PAT. Without it that step is skipped.
+
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+  # Manual run from the Actions tab: publishes the version in package.json
+  # (a version that is already published is skipped).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: ubuntu-latest
+    outputs:
+      vsix: ${{ steps.package.outputs.vsix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Check that the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate test images
+        run: |
+          pip install numpy tifffile imagecodecs Pillow
+          python test/make_fixtures.py
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - name: Package
+        id: package
+        run: |
+          vsix="tiff-viewer-vscode-$(node -p "require('./package.json').version").vsix"
+          npx vsce package --out "$vsix"
+          echo "vsix=$vsix" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: ${{ steps.package.outputs.vsix }}
+          if-no-files-found: error
+
+  marketplace:
+    name: Visual Studio Marketplace
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Trusted Publishing exchanges the GitHub OIDC token for a Marketplace credential
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+
+      - name: Publish
+        run: npx vsce publish --oidc --skip-duplicate --packagePath "${{ needs.build.outputs.vsix }}"
+
+  open-vsx:
+    name: Open VSX
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+
+      - name: Publish
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then
+            echo "::notice::OVSX_PAT is not set; skipping Open VSX."
+            exit 0
+          fi
+          npx ovsx publish --skip-duplicate --packagePath "${{ needs.build.outputs.vsix }}"

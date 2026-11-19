@@ -1,9 +1,12 @@
 import { addDecoder, BaseDecoder, GeoTIFF, getDecoder, type GeoTIFFImage } from 'geotiff';
 // Not exported from the package entry point.
 import { getDecoderParameters } from '../../node_modules/geotiff/dist-module/compression/index.js';
+import PakoDeflateDecoder from '../../node_modules/geotiff/dist-module/compression/deflate.js';
 import type { FileInfo, LevelInfo, PageInfo, PixelWindow, ToneMode } from '../shared/protocol';
 import { decodeCcitt } from './ccitt';
 import { JpegDecoder, usesNativeJpeg } from './jpeg';
+import { lzwDecode } from './lzw';
+import type { DecodePool } from './decodePool';
 import type { MessageSource } from './messageSource';
 
 type Sample = ArrayLike<number> & { [index: number]: number };
@@ -44,6 +47,7 @@ const enum Tag {
   ModelTiepoint = 33922,
   ModelTransformation = 34264,
   GeoKeyDirectory = 34735,
+  GdalMetadata = 42112,
 }
 
 const COMPRESSION_NAMES: Record<number, string> = {
@@ -150,6 +154,42 @@ export function registerDecoders(): void {
       },
       false,
     );
+  }
+
+  class LzwDecoder extends BaseDecoder {
+    decodeBlock(buffer: ArrayBufferLike): ArrayBufferLike {
+      const p = this.parameters as unknown as {
+        tileWidth: number;
+        tileHeight: number;
+        bitsPerSample: number | ArrayLike<number>;
+        planarConfiguration: number;
+      };
+      const bits = toArray(p.bitsPerSample);
+      const pixelBits = p.planarConfiguration === 2 ? (bits[0] ?? 8) : bits.reduce((a, b) => a + b, 0) || 8;
+      const expected = Math.ceil((p.tileWidth * pixelBits) / 8) * p.tileHeight;
+      const decoded = lzwDecode(new Uint8Array(buffer), expected);
+      return decoded.byteLength === decoded.buffer.byteLength ? decoded.buffer : decoded.slice().buffer;
+    }
+  }
+  // Same parameters as geotiff.js' own LZW decoder (the default parameter function).
+  addDecoder(5, async () => LzwDecoder as never);
+
+  // The platform's zlib (DecompressionStream) is about twice as fast as pako,
+  // which geotiff.js uses. pako stays as the fallback: it tolerates trailing
+  // bytes and truncated streams that DecompressionStream rejects.
+  if (typeof DecompressionStream === 'function') {
+    class DeflateDecoder extends PakoDeflateDecoder {
+      // @ts-expect-error The base class is synchronous; geotiff.js awaits decodeBlock either way.
+      async decodeBlock(buffer: ArrayBuffer): Promise<ArrayBuffer> {
+        try {
+          const stream = new Blob([buffer]).stream().pipeThrough(new DecompressionStream('deflate'));
+          return await new Response(stream).arrayBuffer();
+        } catch {
+          return super.decodeBlock(buffer);
+        }
+      }
+    }
+    addDecoder([8, 32946], async () => DeflateDecoder as never);
   }
 
   addDecoder(
@@ -371,9 +411,18 @@ async function describePage(image: GeoTIFFImage, ifd: number): Promise<Page> {
   const alphaIndex = colorSamples.length;
   const hasAlpha = (alphaType === 1 || alphaType === 2) && spp > alphaIndex;
   const samples = hasAlpha ? [...colorSamples, alphaIndex] : colorSamples;
-  for (let i = labels.length; i < spp; i++) {
-    labels.push(i === alphaIndex && hasAlpha ? 'A' : `S${i}`);
+  if (kind === 'gray' && spp > 1) {
+    // Multi-band data: name bands b1…bN, as in composite expressions.
+    labels = [];
   }
+  for (let i = labels.length; i < spp; i++) {
+    labels.push(i === alphaIndex && hasAlpha ? 'A' : kind === 'gray' ? `b${i + 1}` : `S${i}`);
+  }
+  const gdalMetadata = await tagValue(image, Tag.GdalMetadata);
+  const bandNames = parseBandDescriptions(typeof gdalMetadata === 'string' ? gdalMetadata : '', spp);
+  bandNames.forEach((name, i) => {
+    if (name) labels[i] = name;
+  });
 
   const noData = image.getGDALNoData();
   const toneAdjustable = (kind === 'gray' || kind === 'rgb') && !(format === 1 && bits <= 8);
@@ -447,6 +496,7 @@ async function describePage(image: GeoTIFFImage, ifd: number): Promise<Page> {
     toneAdjustable,
     fullRangeAvailable: toneAdjustable && format !== 3,
     sampleLabels: labels,
+    bandNames,
     tags,
   };
   if (!SUPPORTED_COMPRESSIONS.has(compression)) {
@@ -471,6 +521,34 @@ async function describePage(image: GeoTIFFImage, ifd: number): Promise<Page> {
     format,
     colorMap,
   };
+}
+
+const XML_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+
+function decodeXml(text: string): string {
+  return text.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (entity, code: string) => {
+    if (code[0] === '#') {
+      return String.fromCodePoint(code[1] === 'x' || code[1] === 'X' ? parseInt(code.slice(2), 16) : Number(code.slice(1)));
+    }
+    return XML_ENTITIES[code] ?? entity;
+  });
+}
+
+/**
+ * Band descriptions from GDAL's metadata tag, e.g.
+ * `<Item name="DESCRIPTION" sample="3" role="description">B04</Item>`.
+ */
+export function parseBandDescriptions(xml: string, count: number): (string | null)[] {
+  const names: (string | null)[] = new Array(count).fill(null);
+  for (const m of xml.matchAll(/<Item\b([^>]*)>([^<]*)<\/Item>/g)) {
+    const attrs = Object.fromEntries([...m[1].matchAll(/(\w+)\s*=\s*"([^"]*)"/g)].map((a) => [a[1], a[2]]));
+    const sample = Number(attrs.sample);
+    if (attrs.role === 'description' && Number.isInteger(sample) && sample >= 0 && sample < count) {
+      const text = decodeXml(m[2]).trim();
+      if (text) names[sample] = text;
+    }
+  }
+  return names;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,6 +585,8 @@ export interface RegionOptions {
   onProgress?: (done: number, total: number) => void;
   /** Called whenever more output rows are final; `snapshot()` returns rows [0, rows). */
   onRows?: (rows: number, snapshot: () => Sample[]) => void;
+  /** Sample indices to read, instead of the page's display samples. */
+  samples?: number[];
 }
 
 /**
@@ -654,27 +734,120 @@ function releaseTileRead(): void {
 
 const imageIds = new WeakMap<GeoTIFFImage, number>();
 let nextImageId = 1;
-const decoders = new WeakMap<GeoTIFFImage, Promise<BaseDecoder>>();
-const tileCache = new Map<string, ArrayBufferLike>();
+const decoders = new WeakMap<GeoTIFFImage, Promise<ImageDecoder>>();
+/** Decoded tiles (ArrayBuffers), or single bands extracted from them (typed arrays), least recently used first. */
+const tileCache = new Map<string, ArrayBufferLike | Sample>();
 const tilesDecoding = new Map<string, Promise<ArrayBufferLike>>();
 let tileCacheBytes = 0;
 
-function decoderFor(image: GeoTIFFImage): Promise<BaseDecoder> {
+interface ImageDecoder {
+  /** Decodes in this worker; also used for JPEG reduced-size decoding. */
+  local: BaseDecoder;
+  /** Decodes on the helper pool when there is one (what getTileOrStrip calls). */
+  shared: { decode(buffer: ArrayBufferLike): Promise<ArrayBufferLike> };
+}
+
+let decodePool: DecodePool | undefined;
+let nextDecoderKey = 1;
+
+/** Tiles of images opened from now on are decoded by `pool` (except JPEG and uncompressed). */
+export function setDecodePool(pool: DecodePool | undefined): void {
+  decodePool = pool?.size ? pool : undefined;
+}
+
+function decoderFor(image: GeoTIFFImage): Promise<ImageDecoder> {
   let decoder = decoders.get(image);
   if (!decoder) {
     decoder = (async () => {
       const compression = Number((await tagValue(image, Tag.Compression)) ?? 1);
-      return (await getDecoder(compression, await getDecoderParameters(compression, image.getFileDirectory()))) as BaseDecoder;
+      const params = await getDecoderParameters(compression, image.getFileDirectory());
+      const local = (await getDecoder(compression, params)) as BaseDecoder;
+      const pool = decodePool;
+      // The browser already decodes JPEG off-thread, and raw data needs no decoding.
+      if (!pool || compression === 1 || compression === 7) {
+        return { local, shared: local };
+      }
+      const key = nextDecoderKey++;
+      return {
+        local,
+        shared: {
+          decode: (buffer: ArrayBufferLike) =>
+            pool.decode(compression, key, params, buffer as ArrayBuffer).catch(() => local.decode(buffer)),
+        },
+      };
     })();
     decoders.set(image, decoder);
   }
   return decoder;
 }
 
+function imageId(image: GeoTIFFImage): number {
+  let id = imageIds.get(image);
+  if (id === undefined) {
+    id = nextImageId++;
+    imageIds.set(image, id);
+  }
+  return id;
+}
+
+function byteLength(value: ArrayBufferLike | Sample): number {
+  return (value as { byteLength: number }).byteLength;
+}
+
+function cacheGet<T extends ArrayBufferLike | Sample>(key: string): T | undefined {
+  const cached = tileCache.get(key);
+  if (cached) {
+    tileCache.delete(key);
+    tileCache.set(key, cached);
+  }
+  return cached as T | undefined;
+}
+
+function cachePut(key: string, value: ArrayBufferLike | Sample): void {
+  if (tileCache.has(key)) return;
+  tileCache.set(key, value);
+  tileCacheBytes += byteLength(value);
+  for (const [oldKey, old] of tileCache) {
+    if (tileCacheBytes <= TILE_CACHE_BYTES) break;
+    tileCache.delete(oldKey);
+    tileCacheBytes -= byteLength(old);
+  }
+}
+
 /**
  * Decodes one tile or strip (one sample plane when planar), optionally at
- * 1/`reduction` of its size. Recently decoded tiles come from a cache.
+ * 1/`reduction` of its size. Concurrent requests for the same tile share one decode.
  */
+function decodeTile(
+  image: GeoTIFFImage,
+  tx: number,
+  ty: number,
+  sample: number,
+  reduction: number,
+  priority: () => number,
+): Promise<ArrayBufferLike> {
+  const key = `${imageId(image)}/${tx}/${ty}/${sample}/${reduction}`;
+  let pending = tilesDecoding.get(key);
+  if (!pending) {
+    pending = (async () => {
+      await acquireTileRead(priority);
+      try {
+        const decoder = await decoderFor(image);
+        if (reduction === 1) {
+          return (await image.getTileOrStrip(tx, ty, sample, decoder.shared as never)).data;
+        }
+        return (decoder.local as JpegDecoder).decodeScaled(await readTileBytes(image, tx, ty, sample), reduction);
+      } finally {
+        releaseTileRead();
+      }
+    })();
+    tilesDecoding.set(key, pending);
+    void pending.finally(() => tilesDecoding.delete(key)).catch(() => undefined);
+  }
+  return pending;
+}
+
+/** A decoded tile (one sample plane when planar), from the cache when recently decoded. */
 async function readTile(
   image: GeoTIFFImage,
   tx: number,
@@ -683,49 +856,52 @@ async function readTile(
   reduction: number,
   priority: () => number = () => 0,
 ): Promise<ArrayBufferLike> {
-  let id = imageIds.get(image);
-  if (id === undefined) {
-    id = nextImageId++;
-    imageIds.set(image, id);
+  const key = `${imageId(image)}/${tx}/${ty}/${sample}/${reduction}`;
+  const cached = cacheGet<ArrayBufferLike>(key);
+  if (cached) return cached;
+  const data = await decodeTile(image, tx, ty, sample, reduction, priority);
+  cachePut(key, data);
+  return data;
+}
+
+/**
+ * The given samples of a tile, as planes. When the tile interleaves more
+ * samples than are wanted (e.g. 13-band imagery shown as RGB), only the
+ * wanted ones are kept in the cache, each as a compact array: whole decoded
+ * tiles would fill it with bands nobody looks at.
+ */
+async function readTilePlanes(
+  image: GeoTIFFImage,
+  tx: number,
+  ty: number,
+  samples: number[],
+  reduction: number,
+  priority: () => number = () => 0,
+): Promise<Plane[]> {
+  const pixels = (image.getTileWidth() / reduction) * Math.ceil(image.getBlockHeight(ty) / reduction);
+  if (image.planarConfiguration === 2) {
+    const buffers = await Promise.all(samples.map((sample) => readTile(image, tx, ty, sample, reduction, priority)));
+    return samples.map((sample, s) => samplePlane(image, buffers[s], sample, pixels));
   }
-  const key = `${id}/${tx}/${ty}/${sample}/${reduction}`;
-  const cached = tileCache.get(key);
-  if (cached) {
-    tileCache.delete(key);
-    tileCache.set(key, cached);
-    return cached;
+  if (new Set(samples).size >= image.getSamplesPerPixel()) {
+    const buffer = await readTile(image, tx, ty, 0, reduction, priority);
+    return samples.map((sample) => samplePlane(image, buffer, sample, pixels));
   }
-  let pending = tilesDecoding.get(key);
-  if (!pending) {
-    pending = (async () => {
-      await acquireTileRead(priority);
-      try {
-        const decoder = await decoderFor(image);
-        if (reduction === 1) {
-          return (await image.getTileOrStrip(tx, ty, sample, decoder)).data;
-        }
-        return (decoder as JpegDecoder).decodeScaled(await readTileBytes(image, tx, ty, sample), reduction);
-      } finally {
-        releaseTileRead();
-      }
-    })();
-    tilesDecoding.set(key, pending);
+  const base = `${imageId(image)}/${tx}/${ty}/${reduction}/band`;
+  const planes = samples.map((sample) => cacheGet<Sample>(`${base}${sample}`));
+  if (planes.some((plane) => !plane)) {
+    const buffer = await decodeTile(image, tx, ty, 0, reduction, priority);
+    samples.forEach((sample, s) => {
+      if (planes[s]) return;
+      const { array, stride, offset } = samplePlane(image, buffer, sample, pixels);
+      const count = Math.min(pixels, Math.floor((array.length - offset - 1) / stride) + 1);
+      const compact = new (array.constructor as new (length: number) => Sample)(count);
+      for (let i = 0, j = offset; i < count; i++, j += stride) compact[i] = array[j];
+      planes[s] = compact;
+      cachePut(`${base}${sample}`, compact);
+    });
   }
-  try {
-    const data = await pending;
-    if (!tileCache.has(key)) {
-      tileCache.set(key, data);
-      tileCacheBytes += data.byteLength;
-      for (const [oldKey, oldData] of tileCache) {
-        if (tileCacheBytes <= TILE_CACHE_BYTES) break;
-        tileCache.delete(oldKey);
-        tileCacheBytes -= oldData.byteLength;
-      }
-    }
-    return data;
-  } finally {
-    tilesDecoding.delete(key);
-  }
+  return planes.map((array) => ({ array: array!, stride: 1, offset: 0 }));
 }
 
 /** The compressed bytes of a tile (what geotiff.js' getTileOrStrip reads before decoding). */
@@ -746,7 +922,7 @@ async function readTileBytes(image: GeoTIFFImage, tx: number, ty: number, sample
  * output pixel spans `step` source pixels: 1, 2, 4 or 8.
  */
 async function tileReduction(image: GeoTIFFImage, step: number): Promise<number> {
-  const decoder = await decoderFor(image);
+  const decoder = (await decoderFor(image)).local;
   if (!(decoder instanceof JpegDecoder && decoder.scalable && image.isTiled)) {
     return 1;
   }
@@ -784,7 +960,7 @@ export async function readRegion(
   const ow = outWidth;
   const oh = outHeight;
   const n = ow * oh;
-  const samples = page.samples;
+  const samples = options.samples ?? page.samples;
   const exact = ow === ww && oh === wh;
   const average = !exact && page.kind !== 'palette' && ww * wh <= AVERAGE_LIMIT;
   const noData = page.info.noData;
@@ -817,7 +993,6 @@ export async function readRegion(
   const shift = Math.log2(reduction);
   const half = reduction >> 1;
   const rtw = tw / reduction;
-  const planar = image.planarConfiguration;
   const tileBytes = (tw * th * image.getBytesPerPixel()) / (reduction * reduction);
   const batchSize = Math.max(1, Math.min(MAX_BATCH_TILES * reduction, Math.floor(BATCH_BYTES / tileBytes)));
 
@@ -829,7 +1004,7 @@ export async function readRegion(
   const out: Sample[] = samples.map((_, s) => (average ? new Float32Array(n) : new (nearestType(s))(n)));
   const counts = average ? new Uint32Array(n) : null;
 
-  const processTile = (tx: number, ty: number, buffers: ArrayBufferLike[]) => {
+  const processTile = (tx: number, ty: number, planes: Plane[]) => {
     const tileX = tx * tw;
     const tileY = ty * th;
     const blockHeight = image.getBlockHeight(ty);
@@ -838,8 +1013,6 @@ export async function readRegion(
     const cy0 = Math.max(y0, tileY);
     const cy1 = Math.min(y1, tileY + blockHeight);
     if (cx1 <= cx0 || cy1 <= cy0) return;
-    const pixels = rtw * Math.ceil(blockHeight / reduction);
-    const planes = samples.map((sample, s) => samplePlane(image, planar === 1 ? buffers[0] : buffers[s], sample, pixels));
 
     if (average) {
       // Each (possibly reduced) tile pixel goes to the output pixel of its centre.
@@ -908,11 +1081,7 @@ export async function readRegion(
       }
       await Promise.all(
         tileCols.slice(i, i + batchSize).map(async (tx) => {
-          const buffers =
-            planar === 1
-              ? [await readTile(image, tx, ty, 0, reduction, options.priority)]
-              : await Promise.all(samples.map((sample) => readTile(image, tx, ty, sample, reduction, options.priority)));
-          processTile(tx, ty, buffers);
+          processTile(tx, ty, await readTilePlanes(image, tx, ty, samples, reduction, options.priority));
           options.onProgress?.(++done, total);
         }),
       );
@@ -925,6 +1094,64 @@ export async function readRegion(
   }
 
   return { data: average ? finish(oh) : out, width: ow, height: oh };
+}
+
+/** Longest side of the overview used for statistics, and how many tiles a statistics sample may decode. */
+const STATS_SIZE = 512;
+const STATS_TILE_BUDGET = 24;
+
+/**
+ * Values of the given samples over the whole page, for contrast statistics.
+ * Uses an overview of at most STATS_SIZE pixels when one is cheap to read.
+ * Otherwise (a large image without small enough pyramid levels, where an
+ * overview needs every tile) it decodes a grid of tiles spread over the page:
+ * percentiles come out the same, and opening does not wait for a full decode.
+ */
+export async function readStatsSample(page: Page, samples = page.samples, options: RegionOptions = {}): Promise<Sample[]> {
+  const { width, height } = page.info;
+  const longest = Math.max(width, height);
+  const size = Math.min(STATS_SIZE, longest);
+  const w = Math.max(1, Math.round((width * size) / longest));
+  const h = Math.max(1, Math.round((height * size) / longest));
+  const { image, window } = chooseLevel(page, [0, 0, width, height], w);
+  const tw = image.getTileWidth();
+  const th = image.getTileHeight();
+  const cols = Math.ceil(image.getWidth() / tw);
+  const rows = Math.ceil(image.getHeight() / th);
+  if (cols * rows <= STATS_TILE_BUDGET) {
+    return (await readRegion(page, image, window, w, h, { ...options, samples })).data;
+  }
+  const gx = Math.max(1, Math.min(cols, Math.round(Math.sqrt((STATS_TILE_BUDGET * cols) / rows))));
+  const gy = Math.max(1, Math.min(rows, Math.floor(STATS_TILE_BUDGET / gx)));
+  const target = (STATS_SIZE * STATS_SIZE) / (gx * gy);
+  const reads: Promise<RegionResult>[] = [];
+  for (let j = 0; j < gy; j++) {
+    for (let i = 0; i < gx; i++) {
+      const tx = Math.floor(((i + 0.5) * cols) / gx);
+      const ty = Math.floor(((j + 0.5) * rows) / gy);
+      const tile: PixelWindow = [
+        tx * tw,
+        ty * th,
+        Math.min(image.getWidth(), (tx + 1) * tw),
+        Math.min(image.getHeight(), (ty + 1) * th),
+      ];
+      const f = Math.max(1, Math.sqrt(((tile[2] - tile[0]) * (tile[3] - tile[1])) / target));
+      const ow = Math.max(1, Math.round((tile[2] - tile[0]) / f));
+      const oh = Math.max(1, Math.round((tile[3] - tile[1]) / f));
+      reads.push(readRegion(page, image, tile, ow, oh, { ...options, samples }));
+    }
+  }
+  const parts = await Promise.all(reads);
+  const total = parts.reduce((sum, part) => sum + part.width * part.height, 0);
+  return samples.map((_, s) => {
+    const out = new Float32Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      out.set(part.data[s] as ArrayLike<number>, offset);
+      offset += part.width * part.height;
+    }
+    return out;
+  });
 }
 
 export async function readPixel(page: Page, x: number, y: number): Promise<number[]> {

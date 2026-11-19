@@ -21,6 +21,9 @@ const builds = [
     format: 'cjs',
     target: 'node18',
     external: ['vscode'],
+    // Prefer ES module builds: jsonc-parser's default UMD build require()s its
+    // own files at run time, which a bundle cannot satisfy.
+    mainFields: ['module', 'main'],
   },
   // Webview UI
   {
