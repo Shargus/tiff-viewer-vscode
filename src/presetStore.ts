@@ -12,23 +12,34 @@ export const PRESETS_FILE = path.join(PRESETS_DIR, 'presets.jsonc');
 const FORMATTING: FormattingOptions = { insertSpaces: true, tabSize: 2, eol: '\n' };
 
 /** Written when the file does not exist yet: documentation and a commented-out example. */
-const INITIAL_CONTENT = `// Band composite presets for the TIFF Viewer VS Code extension.
+const INITIAL_CONTENT = `// Band rendering presets for the TIFF Viewer VS Code extension.
 //
 // Presets appear in the viewer's "Bands" menu. Write them here, or use
-// "Save as preset…" in the viewer's Composite panel (it edits this file and
+// "Save as preset…" in the viewer's Rendering panel (it edits this file and
 // keeps your comments). Open viewers pick up changes when the file is saved.
 //
 // Each preset:
-//   "name"                  Shown in the Bands menu. A preset named like a built-in one replaces it.
+//   "name"                  Shown in the Bands menu.
 //   "red", "green", "blue"  An RGB composite: one expression per channel, e.g. "B04 / 3000".
 //   "value"                 Or a single expression, shown with "colormap".
-//   "range"                 Values shown as black … full brightness: [min, max] for all channels,
-//                           one [min, max] (or "auto") per channel, or "auto" to stretch with the
-//                           viewer's Contrast setting. Default [0, 1].
+//   "paletted"              Or paletted / unique values (as in QGIS): the band (or expression) whose
+//                           values get the colours in "classes"; values not listed are transparent.
+//   "classes"               [{ "value": 4, "color": "#00a000", "label": "Vegetation" }, …]; colours
+//                           "#rrggbb" or "#rrggbbaa" (with opacity).
+//   "colorRamp"             For "paletted": colours given by Classify, "random" or a colour map.
+//   "range"                 Values shown as black … full brightness: [min, max], or an automatic
+//                           stretch: "auto" (min / max of the image), "percentile" (2% / 98%) or
+//                           "full" (the data type's range). One for all channels, or one per
+//                           channel: [[0, 3000], "auto", "percentile"]. Default [0, 1].
 //   "colormap"              gray, viridis, magma, inferno, plasma, turbo, RdYlGn, RdBu, Spectral,
 //                           terrain; add "_r" to reverse. Default gray.
-//   "gamma"                 Applied after scaling to the range; above 1 brightens. Default 1.
+//   "brightness"            As in QGIS: -255 … 255 (default 0).
+//   "contrast"              As in QGIS: -100 … 100 (default 0).
+//   "saturation"            As in QGIS: -100 … 100 (default 0; -100 is grey).
+//   "gamma"                 As in QGIS: 0.1 … 10 (default 1); above 1 brightens dark tones.
 //   "bands"                 Extra band names for files without band descriptions: { "B04": 4 }.
+//   "variables"             Named intermediate expressions, computed once and usable by later
+//                           variables and by the channels: { "r": "clamp(B04 / 10000, 0, 1)" }.
 //   "match"                 Apply automatically to matching files, e.g. { "bands": 13 } or
 //                           { "fileName": ["S2*_*.tif", "*_l2a.tif"] } (* any text, ? one character).
 //
@@ -87,7 +98,8 @@ export class PresetStore implements vscode.Disposable {
 
   async open(): Promise<void> {
     await this.ensureFile().catch(() => undefined);
-    await vscode.window.showTextDocument(vscode.Uri.file(PRESETS_FILE));
+    // A tab of its own: not a preview, which would replace the viewer's tab when that is a preview too.
+    await vscode.window.showTextDocument(vscode.Uri.file(PRESETS_FILE), { preview: false });
   }
 
   /** Adds `preset`, or replaces the preset with its name. */

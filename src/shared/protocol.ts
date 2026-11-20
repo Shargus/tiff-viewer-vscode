@@ -38,6 +38,7 @@ export type HostToWebview =
       remembered?: Selection;
     }
   | { type: 'presets'; presets: Preset[]; select?: string }
+  | { type: 'colorMapLoaded'; text: string; fileName: string }
   | { type: 'readResult'; id: number; data: Uint8Array[] }
   | { type: 'readError'; id: number; message: string }
   | { type: 'reload'; fileSize: number };
@@ -49,7 +50,11 @@ export type WebviewToHost =
   | { type: 'savePreset'; preset: Preset; bandCount: number }
   | { type: 'deletePreset'; name: string }
   | { type: 'remember'; selection: Selection }
-  | { type: 'openPresetsFile' };
+  | { type: 'openPresetsFile' }
+  /** Asks for a colour map file (QGIS format) to load; answered with 'colorMapLoaded'. */
+  | { type: 'loadColorMap' }
+  /** Asks where to save a colour map file, and writes `text` there. */
+  | { type: 'exportColorMap'; text: string; fileName: string };
 
 // ---------------------------------------------------------------------------
 // Webview <-> worker
@@ -89,8 +94,16 @@ export interface PageInfo {
   sampleLabels: string[];
   /** Band descriptions from GDAL metadata (e.g. "B04", "VV"), null where absent. */
   bandNames: (string | null)[];
-  /** Human readable tag list for the info panel. */
+  /** A short summary for the info panel (resolution, predictor, GeoTIFF). */
   tags: [string, string][];
+  /** Every TIFF tag of the image: "Name (id)" or "Tag id", and its value. */
+  allTags: [string, string][];
+  /** Items of GDAL's metadata tag (dataset items, then "Band N: item"). */
+  metadata: [string, string][];
+  /** GeoTIFF keys by name. */
+  geoKeys: [string, string][];
+  /** The image's colour table (TIFF ColorMap: all reds, then greens, then blues, 16-bit), for palette images. */
+  palette?: number[];
   /** Decoding problem detected up front (e.g. unsupported compression). */
   unsupported?: string;
 }
@@ -136,7 +149,10 @@ export type MainToWorker =
       composite?: CompositeSpec;
       tiles: TileSpec[];
     }
-  | { type: 'pixel'; reqId: number; page: number; x: number; y: number; composite?: CompositeSpec };
+  | { type: 'pixel'; reqId: number; page: number; x: number; y: number; composite?: CompositeSpec }
+  /** Collects the unique values of a composite's (single) expression over the whole page. */
+  | { type: 'classify'; reqId: number; page: number; composite: CompositeSpec }
+  | { type: 'cancelClassify'; reqId: number };
 
 export type WorkerToMain =
   | { type: 'read'; id: number; ranges: ByteRange[] }
@@ -162,4 +178,8 @@ export type WorkerToMain =
       values: number[] | null;
       /** Values of the composite's expressions at the pixel. */
       computed?: number[];
-    };
+    }
+  | { type: 'classifyProgress'; reqId: number; fraction: number }
+  /** Unique values, sorted; `truncated` when there were more than MAX_CLASSES. */
+  | { type: 'classified'; reqId: number; values: number[]; truncated: boolean }
+  | { type: 'classifyError'; reqId: number; message: string };

@@ -33,12 +33,17 @@
                 "required": [
                   "value"
                 ]
+              },
+              {
+                "required": [
+                  "paletted"
+                ]
               }
             ],
             "properties": {
               "name": {
                 "type": "string",
-                "description": "Name shown in the Bands menu. A preset named like a built-in one replaces it."
+                "description": "Name shown in the Bands menu."
               },
               "red": {
                 "type": "string",
@@ -56,8 +61,67 @@
                 "type": "string",
                 "description": "Single-band (shown with `colormap`); used when red/green/blue are absent expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
               },
+              "paletted": {
+                "type": "string",
+                "markdownDescription": "Paletted / unique values (as in QGIS): the band, or an expression, whose values are listed in `classes`. Values not listed are transparent."
+              },
+              "classes": {
+                "type": "array",
+                "description": "Classes of a paletted preset (at most 256).",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "value",
+                    "color"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "number",
+                      "description": "The value."
+                    },
+                    "color": {
+                      "type": "string",
+                      "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+                      "markdownDescription": "`#rrggbb`, or `#rrggbbaa` with opacity."
+                    },
+                    "label": {
+                      "type": "string",
+                      "description": "Label, shown in the pixel readout."
+                    }
+                  }
+                },
+                "maxItems": 256
+              },
+              "colorRamp": {
+                "type": "string",
+                "enum": [
+                  "random",
+                  "gray",
+                  "viridis",
+                  "magma",
+                  "inferno",
+                  "plasma",
+                  "turbo",
+                  "RdYlGn",
+                  "RdBu",
+                  "Spectral",
+                  "terrain",
+                  "gray_r",
+                  "viridis_r",
+                  "magma_r",
+                  "inferno_r",
+                  "plasma_r",
+                  "turbo_r",
+                  "RdYlGn_r",
+                  "RdBu_r",
+                  "Spectral_r",
+                  "terrain_r"
+                ],
+                "default": "random",
+                "description": "Colours given by Classify and + in a paletted preset: \"random\" (QGIS's random colours) or a colour map."
+              },
               "range": {
-                "markdownDescription": "Expression values shown from black to full brightness: `[min, max]` for all channels, one `[min, max]` (or `\"auto\"`) per channel, or `\"auto\"` to stretch with the viewer's Contrast setting. Default `[0, 1]`.",
+                "markdownDescription": "Values shown as black … full brightness: `[min, max]`, or an automatic stretch: `\"auto\"` (or `\"minmax\"`: the image's min / max), `\"percentile\"` (2% / 98%), `\"full\"` (the data type's range). One for all channels, or one per channel. Default `[0, 1]`.",
                 "oneOf": [
                   {
                     "type": "array",
@@ -70,7 +134,10 @@
                   {
                     "type": "string",
                     "enum": [
-                      "auto"
+                      "auto",
+                      "minmax",
+                      "percentile",
+                      "full"
                     ]
                   },
                   {
@@ -88,7 +155,10 @@
                         {
                           "type": "string",
                           "enum": [
-                            "auto"
+                            "auto",
+                            "minmax",
+                            "percentile",
+                            "full"
                           ]
                         }
                       ]
@@ -123,11 +193,33 @@
                 "default": "gray",
                 "description": "Colour map for a single-band expression (`_r` reverses it)."
               },
+              "brightness": {
+                "type": "number",
+                "minimum": -255,
+                "maximum": 255,
+                "default": 0,
+                "description": "As in QGIS: -255 to 255, added to every colour component."
+              },
+              "contrast": {
+                "type": "number",
+                "minimum": -100,
+                "maximum": 100,
+                "default": 0,
+                "description": "As in QGIS: -100 to 100."
+              },
+              "saturation": {
+                "type": "number",
+                "minimum": -100,
+                "maximum": 100,
+                "default": 0,
+                "description": "As in QGIS: -100 (grey) to 100."
+              },
               "gamma": {
                 "type": "number",
-                "exclusiveMinimum": 0,
+                "minimum": 0.1,
+                "maximum": 10,
                 "default": 1,
-                "description": "Gamma applied after scaling to the range; above 1 brightens."
+                "description": "As in QGIS: 0.1 to 10; above 1 brightens dark tones."
               },
               "bands": {
                 "type": "object",
@@ -136,6 +228,16 @@
                   "minimum": 1
                 },
                 "markdownDescription": "Extra band names for files without band descriptions: name → 1-based band number, e.g. `{ \"B04\": 4, \"B08\": 8 }`."
+              },
+              "variables": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                },
+                "markdownDescription": "Named intermediate expressions, in order. Each may use the bands and the variables defined before it; the channel expressions may use all of them. Each is computed once per pixel, e.g. `{ \"ndvi\": \"(B08 - B04) / (B08 + B04)\" }`."
               },
               "match": {
                 "type": "object",
@@ -173,7 +275,7 @@
               }
             }
           },
-          "description": "Band composite presets."
+          "description": "Band rendering presets."
         }
       },
       "required": [
@@ -207,12 +309,17 @@
             "required": [
               "value"
             ]
+          },
+          {
+            "required": [
+              "paletted"
+            ]
           }
         ],
         "properties": {
           "name": {
             "type": "string",
-            "description": "Name shown in the Bands menu. A preset named like a built-in one replaces it."
+            "description": "Name shown in the Bands menu."
           },
           "red": {
             "type": "string",
@@ -230,8 +337,67 @@
             "type": "string",
             "description": "Single-band (shown with `colormap`); used when red/green/blue are absent expression over band names, e.g. `B04 / 3000`. Bands are b1…bN, the file's band descriptions (e.g. B04, VV) and the names in `bands`."
           },
+          "paletted": {
+            "type": "string",
+            "markdownDescription": "Paletted / unique values (as in QGIS): the band, or an expression, whose values are listed in `classes`. Values not listed are transparent."
+          },
+          "classes": {
+            "type": "array",
+            "description": "Classes of a paletted preset (at most 256).",
+            "items": {
+              "type": "object",
+              "required": [
+                "value",
+                "color"
+              ],
+              "properties": {
+                "value": {
+                  "type": "number",
+                  "description": "The value."
+                },
+                "color": {
+                  "type": "string",
+                  "pattern": "^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+                  "markdownDescription": "`#rrggbb`, or `#rrggbbaa` with opacity."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Label, shown in the pixel readout."
+                }
+              }
+            },
+            "maxItems": 256
+          },
+          "colorRamp": {
+            "type": "string",
+            "enum": [
+              "random",
+              "gray",
+              "viridis",
+              "magma",
+              "inferno",
+              "plasma",
+              "turbo",
+              "RdYlGn",
+              "RdBu",
+              "Spectral",
+              "terrain",
+              "gray_r",
+              "viridis_r",
+              "magma_r",
+              "inferno_r",
+              "plasma_r",
+              "turbo_r",
+              "RdYlGn_r",
+              "RdBu_r",
+              "Spectral_r",
+              "terrain_r"
+            ],
+            "default": "random",
+            "description": "Colours given by Classify and + in a paletted preset: \"random\" (QGIS's random colours) or a colour map."
+          },
           "range": {
-            "markdownDescription": "Expression values shown from black to full brightness: `[min, max]` for all channels, one `[min, max]` (or `\"auto\"`) per channel, or `\"auto\"` to stretch with the viewer's Contrast setting. Default `[0, 1]`.",
+            "markdownDescription": "Values shown as black … full brightness: `[min, max]`, or an automatic stretch: `\"auto\"` (or `\"minmax\"`: the image's min / max), `\"percentile\"` (2% / 98%), `\"full\"` (the data type's range). One for all channels, or one per channel. Default `[0, 1]`.",
             "oneOf": [
               {
                 "type": "array",
@@ -244,7 +410,10 @@
               {
                 "type": "string",
                 "enum": [
-                  "auto"
+                  "auto",
+                  "minmax",
+                  "percentile",
+                  "full"
                 ]
               },
               {
@@ -262,7 +431,10 @@
                     {
                       "type": "string",
                       "enum": [
-                        "auto"
+                        "auto",
+                        "minmax",
+                        "percentile",
+                        "full"
                       ]
                     }
                   ]
@@ -297,11 +469,33 @@
             "default": "gray",
             "description": "Colour map for a single-band expression (`_r` reverses it)."
           },
+          "brightness": {
+            "type": "number",
+            "minimum": -255,
+            "maximum": 255,
+            "default": 0,
+            "description": "As in QGIS: -255 to 255, added to every colour component."
+          },
+          "contrast": {
+            "type": "number",
+            "minimum": -100,
+            "maximum": 100,
+            "default": 0,
+            "description": "As in QGIS: -100 to 100."
+          },
+          "saturation": {
+            "type": "number",
+            "minimum": -100,
+            "maximum": 100,
+            "default": 0,
+            "description": "As in QGIS: -100 (grey) to 100."
+          },
           "gamma": {
             "type": "number",
-            "exclusiveMinimum": 0,
+            "minimum": 0.1,
+            "maximum": 10,
             "default": 1,
-            "description": "Gamma applied after scaling to the range; above 1 brightens."
+            "description": "As in QGIS: 0.1 to 10; above 1 brightens dark tones."
           },
           "bands": {
             "type": "object",
@@ -310,6 +504,16 @@
               "minimum": 1
             },
             "markdownDescription": "Extra band names for files without band descriptions: name → 1-based band number, e.g. `{ \"B04\": 4, \"B08\": 8 }`."
+          },
+          "variables": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "markdownDescription": "Named intermediate expressions, in order. Each may use the bands and the variables defined before it; the channel expressions may use all of them. Each is computed once per pixel, e.g. `{ \"ndvi\": \"(B08 - B04) / (B08 + B04)\" }`."
           },
           "match": {
             "type": "object",

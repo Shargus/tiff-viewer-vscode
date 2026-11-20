@@ -6,6 +6,7 @@ import type { FileInfo, LevelInfo, PageInfo, PixelWindow, ToneMode } from '../sh
 import { decodeCcitt } from './ccitt';
 import { JpegDecoder, usesNativeJpeg } from './jpeg';
 import { lzwDecode } from './lzw';
+import { parseGdalMetadata, readAllTags, readGeoKeys } from './tags';
 import type { DecodePool } from './decodePool';
 import type { MessageSource } from './messageSource';
 
@@ -95,8 +96,6 @@ const SAMPLE_FORMAT_NAMES: Record<number, string> = {
   4: 'Undefined',
 };
 
-/** Longer text tags (e.g. embedded XML metadata) are cut in the info panel. */
-const MAX_TAG_TEXT = 1500;
 
 let decodersRegistered = false;
 
@@ -424,27 +423,16 @@ async function describePage(image: GeoTIFFImage, ifd: number): Promise<Page> {
     if (name) labels[i] = name;
   });
 
-  const noData = image.getGDALNoData();
+  let noData = image.getGDALNoData();
+  if (noData !== null && format === 3 && bits === 32) {
+    // GDAL may write the value in shortened decimal form (e.g. -3.40282346638529e+38 for the
+    // lowest float32): compare with the float32 the pixels actually hold.
+    noData = Math.fround(noData);
+  }
   const toneAdjustable = (kind === 'gray' || kind === 'rgb') && !(format === 1 && bits <= 8);
 
+  // A short summary; every tag is listed in allTags.
   const tags: [string, string][] = [];
-  const addText = async (label: string, id: number) => {
-    const value = await tagValue(image, id);
-    if (typeof value === 'string' && value.trim()) {
-      const text = value.replace(/\0+$/, '').trim();
-      tags.push([label, text.length > MAX_TAG_TEXT ? `${text.slice(0, MAX_TAG_TEXT)}… (${text.length} characters)` : text]);
-    }
-  };
-  await addText('Document name', Tag.DocumentName);
-  await addText('Page name', Tag.PageName);
-  await addText('Description', Tag.ImageDescription);
-  await addText('Make', Tag.Make);
-  await addText('Model', Tag.Model);
-  await addText('Software', Tag.Software);
-  await addText('Date/time', Tag.DateTime);
-  await addText('Artist', Tag.Artist);
-  await addText('Host computer', Tag.HostComputer);
-  await addText('Copyright', Tag.Copyright);
   const xRes = await tagValue(image, Tag.XResolution);
   if (xRes !== undefined) {
     const yRes = await tagValue(image, Tag.YResolution);
@@ -498,6 +486,10 @@ async function describePage(image: GeoTIFFImage, ifd: number): Promise<Page> {
     sampleLabels: labels,
     bandNames,
     tags,
+    allTags: (await readAllTags(image)).map((t): [string, string] => [t.label, t.value]),
+    palette: kind === 'palette' && colorMap ? Array.from(colorMap as ArrayLike<number>) : undefined,
+    metadata: typeof gdalMetadata === 'string' ? parseGdalMetadata(gdalMetadata) : [],
+    geoKeys: readGeoKeys(image),
   };
   if (!SUPPORTED_COMPRESSIONS.has(compression)) {
     info.unsupported = `${compressionName} compression is not supported.`;
@@ -587,6 +579,8 @@ export interface RegionOptions {
   onRows?: (rows: number, snapshot: () => Sample[]) => void;
   /** Sample indices to read, instead of the page's display samples. */
   samples?: number[];
+  /** Take the nearest pixel instead of averaging (for class values, where an average means nothing). */
+  nearest?: boolean;
 }
 
 /**
@@ -962,7 +956,7 @@ export async function readRegion(
   const n = ow * oh;
   const samples = options.samples ?? page.samples;
   const exact = ow === ww && oh === wh;
-  const average = !exact && page.kind !== 'palette' && ww * wh <= AVERAGE_LIMIT;
+  const average = !exact && !options.nearest && page.kind !== 'palette' && ww * wh <= AVERAGE_LIMIT;
   const noData = page.info.noData;
 
   let srcX: Int32Array | null = null;
@@ -1002,7 +996,8 @@ export async function readRegion(
     return format === 1 && bytes === 1 ? Uint8Array : format === 1 && bytes === 2 ? Uint16Array : Float32Array;
   };
   const out: Sample[] = samples.map((_, s) => (average ? new Float32Array(n) : new (nearestType(s))(n)));
-  const counts = average ? new Uint32Array(n) : null;
+  // Valid pixels summed into each output pixel, per band: each band leaves out its own NoData.
+  const counts = average ? samples.map(() => new Uint32Array(n)) : null;
 
   const processTile = (tx: number, ty: number, planes: Plane[]) => {
     const tileX = tx * tw;
@@ -1016,7 +1011,6 @@ export async function readRegion(
 
     if (average) {
       // Each (possibly reduced) tile pixel goes to the output pixel of its centre.
-      const first = planes[0];
       const rx0 = (cx0 - tileX) >> shift;
       const rx1 = (cx1 - tileX + reduction - 1) >> shift;
       const ry0 = (cy0 - tileY) >> shift;
@@ -1027,15 +1021,14 @@ export async function readRegion(
         const rowBase = ry * rtw;
         for (let rx = rx0; rx < rx1; rx++) {
           const p = rowBase + rx;
-          const v = first.array[p * first.stride + first.offset];
-          if (v !== v || v === noData) continue;
           const sx = Math.min(cx1 - 1, Math.max(cx0, tileX + (rx << shift) + half));
           const o = oyBase + dstX![sx - x0];
-          counts![o]++;
-          out[0][o] += v;
-          for (let s = 1; s < planes.length; s++) {
+          for (let s = 0; s < planes.length; s++) {
             const plane = planes[s];
-            out[s][o] += plane.array[p * plane.stride + plane.offset];
+            const v = plane.array[p * plane.stride + plane.offset];
+            if (v !== v || v === noData) continue;
+            counts![s][o]++;
+            out[s][o] += v;
           }
         }
       }
@@ -1062,10 +1055,11 @@ export async function readRegion(
     if (!average) {
       return out.map((a) => (a as Float32Array).subarray(0, rows * ow));
     }
-    return out.map((acc) => {
+    return out.map((acc, s) => {
       const result = new Float32Array(rows * ow);
+      const count = counts![s];
       for (let i = 0; i < result.length; i++) {
-        const c = counts![i];
+        const c = count[i];
         result[i] = c ? acc[i] / c : NaN;
       }
       return result;

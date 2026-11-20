@@ -17,10 +17,10 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 - **Compression**: none, LZW, Deflate, JPEG, PackBits, Zstandard, WebP, LERC, and CCITT fax (modified Huffman RLE, Group 3, Group 4).
 - **Pixel formats**: 1 to 64 bits per sample, unsigned and signed integers, 16/32/64-bit floating point, tiled or striped, chunky or planar.
 - **Colour models**: grayscale (WhiteIsZero / BlackIsZero), RGB, palette, CMYK, YCbCr, CIE L\*a\*b\*, with alpha (associated or unassociated).
-- **High bit depth and float data** are contrast-stretched: *min–max*, *2%–98%*, or the *full range* of the data type. NaN and GDAL NoData pixels are shown as transparent.
+- **High bit depth and float data** are contrast-stretched: by default from the image's minimum to its maximum; in the **Rendering** panel, per channel, *min–max*, *2%–98%*, or the *full range* of the data type. NaN and GDAL NoData pixels are shown as transparent.
 - **Band composites** for multi-band imagery such as Sentinel-2 and Sentinel-1: RGB composites and band math with colour maps, saved as presets that can apply automatically (see below).
 - **Pixel readout**: the status bar shows the coordinates and the raw sample values under the cursor (and the composite's values).
-- **Info panel**: format, byte order, dimensions, bit depth, compression, tiling, pyramid levels, and common tags (description, software, date, resolution, GeoTIFF EPSG code, …).
+- **Info panel**: format, byte order, dimensions, bit depth, compression, tiling, pyramid levels, GDAL metadata items (as `gdalinfo` shows them), GeoTIFF keys, and every TIFF tag, including private and custom ones (by number). Long values expand on click.
 - Reloads automatically when the file changes on disk.
 
 ## Controls
@@ -33,39 +33,99 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 | Actual size (100%) | **1:1** | <kbd>1</kbd> |
 | Next / previous page | Page selector | <kbd>PageDown</kbd> / <kbd>PageUp</kbd>, <kbd>]</kbd> / <kbd>[</kbd> |
 | Info panel | **Info** | <kbd>I</kbd> |
-| Composite panel | **Composite** | <kbd>B</kbd> |
+| Rendering panel | **Rendering** | <kbd>B</kbd> |
 
 ## Band composites and presets
 
-Pick a preset from the **Bands** menu in the toolbar, or click **Composite** to make your own:
+Click **Rendering** in the toolbar (or press <kbd>B</kbd>) to show the data your way:
 
 - **RGB**: one expression per channel, e.g. red `B04 / 3000`, green `B03 / 3000`, blue `B02 / 3000`.
 - **Single band**: one expression shown with a colour map, e.g. `(B08 - B04) / (B08 + B04)` with *RdYlGn*.
+- **Paletted**: a colour for each value of a band, for classifications and masks, e.g. the Sentinel-2 scene classification `SCL` (see below).
 
-Each channel's **min** and **max** are the values shown as black and as full brightness (the default is 0 to 1, hence the division by 3000 above). Leave them empty to stretch automatically with the **Contrast** setting (min–max or 2%–98%). Pixels where every channel is NoData are transparent.
+Each channel's **min** and **max** are the values shown as black and as full brightness. Leave both empty (as in a new composite) to stretch automatically: **auto =** then lets you choose, per channel, between **Min / Max** (the image's lowest and highest values, the default), **2% / 98%** (ignoring the darkest and brightest 2%), and **Full range** (the whole range of the data type, e.g. 0 to 65535 for 16-bit data). Pixels where every channel is NoData are transparent, and the status bar shows the computed values next to the raw band values under the cursor.
 
-**Band names** in expressions:
+**Brightness**, **contrast**, **saturation** and **gamma** work as in QGIS's raster symbology: brightness from −255 to 255, contrast and saturation from −100 to 100 (0: unchanged; saturation −100: grey), gamma from 0.1 to 10 (1: unchanged; above 1 brightens dark tones). Each has a slider and a box to type a value; double-click a slider, or click **Reset adjustments**, to go back to the default. For a single band they apply to the colour map's colours.
+
+RGB and Single band each keep their own settings while the image is open, so you can switch between them freely. Choosing **Default** in the Bands menu (the file's own rendering: RGB and palette images in their colours, other images' first band in grey) leaves the panel as it is. Custom settings are forgotten when the image is closed: save them as a preset to keep them.
+
+### Paletted / unique values
+
+Like QGIS's *Paletted/Unique values* renderer: each value listed in the table gets its colour, opacity and label; NoData and values not listed are transparent. Values are taken as they are when zoomed out, never averaged.
+
+- **Classify** lists every value of the band (or expression) over the whole image. A paletted rendering has at most 256 classes: Classify stops when it finds more (continuous data suits Single band better), and loading a colour table or file with more keeps the first 256. Values already in the table keep their colour and label; new ones get colours from the **Colour ramp** (*Random colors*, as in QGIS, or a colour map).
+- **+** adds a value (the next whole number), **−** deletes the selected classes, **Delete all** empties the table.
+- Edit a value, colour, opacity or label in the table. Tick several classes to change their colour, opacity or label together. Changing the colour ramp re-colours every class.
+- **…** offers **Load classes from layer** (the image's own colour table, for paletted TIFFs), **Load colour map from file…** and **Export colour map to file…** in QGIS's `.clr` format: one class per line, `value red green blue alpha label`.
+- The status bar shows the value under the cursor with its label.
+
+In a preset:
+
+```jsonc
+{
+  "name": "Sentinel-2 scene classification",
+  "paletted": "SCL",
+  "classes": [
+    { "value": 3, "color": "#643200", "label": "Cloud shadow" },
+    { "value": 4, "color": "#00a000", "label": "Vegetation" },
+    { "value": 6, "color": "#0000ff", "label": "Water" },
+    { "value": 9, "color": "#ffffffc0", "label": "Cloud (high probability)" }   // #rrggbbaa: 75% opacity
+  ]
+}
+```
+
+### Band names and expressions
+
+Expressions can use:
 
 - `b1` … `bN`: band numbers, always available.
 - The file's band descriptions (as written by GDAL, rasterio, Google Earth Engine, …), e.g. `B04`, `B8A`, `VV`. The panel lists them; click one to insert it.
-- Names a preset defines in `bands`, for files without descriptions (the built-in Sentinel-2 presets know the usual 4, 10, 12 and 13-band layouts).
+- Names defined in the preset's `bands` (for files without band descriptions) and `variables` (see below).
 
-**Expressions** support `+ - * / % ^`, comparisons `< <= > >= == !=` (1 or 0), and `abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2`, plus `pi`. For example `where(SCL == 9, 0, B04 / 3000)` blanks cloudy pixels, and `10 * log10(VV)` converts power to dB.
+They support `+ - * / % ^`, comparisons `< <= > >= == !=` (1 or 0), and `abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2`, plus `pi`. For example `where(SCL == 9, 0, B04 / 3000)` blanks cloudy pixels, and `10 * log10(VV)` converts power to dB.
 
-**Presets** are kept in a file in your home folder, **`~/.tiff-viewer-vscode/presets.jsonc`** (on Windows, `%USERPROFILE%\.tiff-viewer-vscode\presets.jsonc`). It is created when the extension first starts, with comments describing the format and an example, so you can edit it by hand, keep it under version control or copy it to another machine. Open it with **TIFF: Open Band Composite Presets File** from the Command Palette, or the link in the Composite panel; VS Code offers completion and validation while you edit it. Open viewers pick up changes as soon as the file is saved.
+### Creating presets
 
-**Save as preset…** in the Composite panel asks for a name and whether to apply the preset automatically (to files with the same number of bands, or to file names matching a pattern), then adds it to the file, changing only that entry and keeping your comments. **Delete preset** removes it the same way. If the file has a syntax error, the viewer keeps the last valid presets and tells you the line.
+The extension comes with no presets: you make the ones you need, and they appear in the **Bands** menu. They are kept in a file in your home folder, **`~/.tiff-viewer-vscode/presets.jsonc`** (on Windows, `%USERPROFILE%\.tiff-viewer-vscode\presets.jsonc`), created when the extension first starts with comments describing the format. With Remote-SSH, WSL or containers, it is in the home folder of the machine the files are on.
 
-With Remote-SSH, WSL or containers, the file is in the home folder of the machine the files are on.
+There are two ways to create a preset:
+
+- **From the viewer**: set up the rendering in the **Rendering** panel, then click **Save as preset…**. It asks for a name and whether to apply the preset automatically (to files with the same number of bands, or to file names matching a pattern), and adds it to the file. **Delete preset** removes the selected one.
+- **By hand**: open the file with **TIFF: Open Rendering Presets File** from the Command Palette, or the link at the bottom of the Rendering panel, and add an entry to `"presets"`. VS Code offers completion and validation while you edit, comments are allowed, and open viewers pick up the changes when you save. If the file has a syntax error, the viewer keeps the last valid presets and tells you the line.
+
+The viewer edits only the entry concerned and keeps your comments and formatting.
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Name in the Bands menu (required). |
+| `red`, `green`, `blue` | An RGB composite: one expression per channel. |
+| `value` | Or a single expression, shown with `colormap`. |
+| `range` | Values shown as black … full brightness: `[min, max]`, or an automatic stretch: `"auto"` (Min / Max), `"percentile"` (2% / 98%) or `"full"` (the data type's range). One for all channels, or a list with one per channel. Default `[0, 1]`. |
+| `paletted`, `classes`, `colorRamp` | Paletted rendering: the band or expression, its classes (`value`, `color` as `#rrggbb` or `#rrggbbaa`, `label`), and the ramp used by Classify (`"random"` or a colour map). |
+| `colormap` | For `value`: `gray` (default), `viridis`, `magma`, `inferno`, `plasma`, `turbo`, `RdYlGn`, `RdBu`, `Spectral`, `terrain`; add `_r` to reverse. |
+| `brightness`, `contrast`, `saturation`, `gamma` | As in QGIS: brightness −255…255, contrast and saturation −100…100 (default 0), gamma 0.1…10 (default 1). |
+| `bands` | Extra band names for files without band descriptions: name → band number, e.g. `{ "B04": 4 }`. |
+| `variables` | Named intermediate expressions, in order: each may use the bands and the variables before it, and the channels may use them all. Each is computed once per pixel, which keeps long formulas readable and fast. |
+| `match` | Apply automatically to matching files: `{ "bands": 13 }`, `{ "fileName": "S2*_L2A*.tif" }` or a list of patterns (`*` any text, `?` one character, case-insensitive), or both. |
+
+When a file opens, the viewer shows what you last chose for that file, otherwise the first preset whose `match` fits, otherwise the image's own colours.
+
+Some examples:
 
 ```jsonc
 {
   "presets": [
     {
       "name": "Sentinel-2 true colour",
-      "red": "B04 / 3000", "green": "B03 / 3000", "blue": "B02 / 3000",
-      "gamma": 1.2,
-      "match": { "bands": 13 }                  // apply to every 13-band file
+      "red": "B04", "green": "B03", "blue": "B02",
+      "range": "percentile",                     // 2% / 98% stretch, per channel
+      "contrast": 10, "saturation": 20
+    },
+    {
+      "name": "NDVI",
+      "variables": { "nir": "B08", "vis": "B04" },
+      "value": "(nir - vis) / (nir + vis)",
+      "range": [-1, 1], "colormap": "RdYlGn"
     },
     {
       "name": "S1 RTC (dB × 100)",               // int16 = round(10·log10(γ⁰) · 100)
@@ -82,7 +142,58 @@ With Remote-SSH, WSL or containers, the file is in the home folder of the machin
 }
 ```
 
-Colour maps: `gray`, `viridis`, `magma`, `inferno`, `plasma`, `turbo`, `RdYlGn`, `RdBu`, `Spectral`, `terrain`; add `_r` to reverse one. A preset with the name of a built-in one replaces it. When a file opens, the viewer shows what you last chose for that file, otherwise the first preset whose `match` rule fits, otherwise the image's own colours.
+### Simple Sentinel-2 true colour
+
+Sentinel Hub's [basic true colour script](https://custom-scripts.sentinel-hub.com/sentinel-2/true_color/) multiplies the reflectance of B04, B03 and B02 by 2.5, so reflectance 0 to 0.4 goes from black to full brightness. In this extension that is just a display range on the raw bands, which makes it the fastest true colour preset:
+
+```jsonc
+{
+  "presets": [
+    {
+      "name": "Sentinel-2 L2A true colour (simple)",
+      "red": "B04", "green": "B03", "blue": "B02",
+      "range": [1000, 5000],    // reflectance 0 … 0.4 with the 1000 offset; [0, 4000] before baseline 04.00
+      "match": { "bands": 13 }
+    }
+  ]
+}
+```
+
+It is a linear stretch, so vegetation (reflectance around 0.03 in red) looks dark, and bright surfaces above reflectance 0.4 (clouds, snow, bright sand) show as plain white. The Copernicus Browser version below brightens the darks and compresses the highlights instead, at about twice the rendering time. As there, the range assumes products from processing baseline 04.00 onwards, which add 1000 to every value; for older ones use `[0, 4000]`.
+
+### Copernicus Browser true colour
+
+The [Copernicus Browser](https://browser.dataspace.copernicus.eu/) shows Sentinel-2 L2A with its **True color** layer, the Sentinel Hub *optimized true colour* script: a contrast curve that puts reflectance 0.13 in the middle of its range and compresses highlights up to reflectance 3, a gamma of 1.8, a 1.2× saturation boost and sRGB encoding. This preset reproduces it exactly, up to 8-bit rounding (the tests check it against the script itself):
+
+```jsonc
+{
+  "presets": [
+    {
+      "name": "Sentinel-2 L2A true colour (Copernicus Browser)",
+      "variables": {
+        "ar": "clamp((B04 - 1000) / 10000 / 3, 0, 1)",
+        "ag": "clamp((B03 - 1000) / 10000 / 3, 0, 1)",
+        "ab": "clamp((B02 - 1000) / 10000 / 3, 0, 1)",
+        "r": "((ar * (ar * (0.13 / 3) - 1) / (ar * (2 * 0.13 / 3 - 1) - 0.13 / 3) + 0.01) ^ 1.8 - 0.01 ^ 1.8) / (1.01 ^ 1.8 - 0.01 ^ 1.8)",
+        "g": "((ag * (ag * (0.13 / 3) - 1) / (ag * (2 * 0.13 / 3 - 1) - 0.13 / 3) + 0.01) ^ 1.8 - 0.01 ^ 1.8) / (1.01 ^ 1.8 - 0.01 ^ 1.8)",
+        "b": "((ab * (ab * (0.13 / 3) - 1) / (ab * (2 * 0.13 / 3 - 1) - 0.13 / 3) + 0.01) ^ 1.8 - 0.01 ^ 1.8) / (1.01 ^ 1.8 - 0.01 ^ 1.8)",
+        "grey": "(r + g + b) / 3 * (1 - 1.2)",
+        "lr": "clamp(grey + 1.2 * r, 0, 1)",
+        "lg": "clamp(grey + 1.2 * g, 0, 1)",
+        "lb": "clamp(grey + 1.2 * b, 0, 1)"
+      },
+      "red": "where(lr <= 0.0031308, 12.92 * lr, 1.055 * lr ^ 0.41666666666 - 0.055)",
+      "green": "where(lg <= 0.0031308, 12.92 * lg, 1.055 * lg ^ 0.41666666666 - 0.055)",
+      "blue": "where(lb <= 0.0031308, 12.92 * lb, 1.055 * lb ^ 0.41666666666 - 0.055)",
+      "match": { "bands": 13 }
+    }
+  ]
+}
+```
+
+It is written for L2A products from **processing baseline 04.00 onwards**, whose bands store reflectance as `(DN - 1000) / 10000`. That covers everything processed since 25 January 2022, including older acquisitions that have been reprocessed (for example ESA's Collection-1 reprocessing, baselines 05.xx, which covers images back to 2015). The `PROCESSING_BASELINE` in the product metadata tells you which one you have. Sentinel Hub, and so the Copernicus Browser, remove this offset before applying the script, which is why the preset subtracts 1000.
+
+**Images processed before baseline 04.00** (no offset, reflectance `DN / 10000`) need the offset removed from the preset: use `clamp(B04 / 10000 / 3, 0, 1)` in `ar`, and likewise `B03` in `ag` and `B02` in `ab`; otherwise they look too dark. Change or remove `match` to suit your files.
 
 ## Using another editor for TIFF files
 

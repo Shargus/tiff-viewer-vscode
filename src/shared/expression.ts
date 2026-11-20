@@ -13,17 +13,24 @@
  *   unary   := ('-' | '+') unary | power
  *   power   := atom (('^' | '**') unary)?
  *   atom    := number | name | name '(' expr (',' expr)* ')' | '(' expr ')'
- * Comparisons give 1 or 0. Names are band variables or `pi`.
+ * Comparisons give 1 or 0. Names are bands, variables (named expressions
+ * defined before, each computed once) or `pi`.
  */
 
 type Node =
   | { kind: 'num'; value: number }
   | { kind: 'band'; sample: number }
+  | { kind: 'var'; index: number }
   | { kind: 'neg'; arg: Node }
   | { kind: 'bin'; op: string; left: Node; right: Node }
   | { kind: 'call'; fn: string; args: Node[] };
 
 export class ExpressionError extends Error {
+  /** Index of the failing expression, when compiling several. */
+  index?: number;
+  /** Name of the failing variable, when the error is in a variable's definition. */
+  variable?: string;
+
   constructor(
     message: string,
     readonly position: number,
@@ -88,7 +95,13 @@ function tokenize(source: string): Token[] {
   return tokens;
 }
 
-function parse(source: string, bands: Record<string, number>): Node {
+function parse(
+  source: string,
+  bands: Record<string, number>,
+  variables: Map<string, number>,
+  /** Variables defined after this expression's (for a clearer error), or undefined when none exist. */
+  laterVariables?: Set<string>,
+): Node {
   const tokens = tokenize(source);
   let i = 0;
   const peek = () => tokens[i];
@@ -171,11 +184,19 @@ function parse(source: string, bands: Record<string, number>): Node {
         }
         return { kind: 'call', fn: t.text, args };
       }
+      // Variables shadow bands of the same name.
+      const variable = variables.get(t.text);
+      if (variable !== undefined) {
+        return { kind: 'var', index: variable };
+      }
       if (Object.prototype.hasOwnProperty.call(bands, t.text)) {
         return { kind: 'band', sample: bands[t.text] };
       }
       if (t.text === 'pi') return { kind: 'num', value: Math.PI };
-      throw new ExpressionError(`Unknown band '${t.text}'`, t.pos);
+      if (laterVariables?.has(t.text)) {
+        throw new ExpressionError(`'${t.text}' is defined after this variable; a variable can only use the ones before it`, t.pos);
+      }
+      throw new ExpressionError(`Unknown ${laterVariables ? 'band or variable' : 'band'} '${t.text}'`, t.pos);
     }
     if (isOp('(')) {
       i++;
@@ -283,22 +304,51 @@ export interface CompiledExpressions {
   evaluate(data: ArrayLike<number>[], n: number, noData: number | null): Float32Array[];
 }
 
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /**
- * Parses expressions over band variables (name → 0-based sample index).
- * Throws ExpressionError, with `index` set to the failing expression.
+ * Parses expressions over bands (name → 0-based sample index) and optional
+ * variables: named expressions, in order, each of which may use the bands
+ * and the variables defined before it. Throws ExpressionError, with `index`
+ * set to the failing expression or `variable` to the failing variable.
  */
-export function compileExpressions(sources: string[], bands: Record<string, number>): CompiledExpressions {
+export function compileExpressions(
+  sources: string[],
+  bands: Record<string, number>,
+  variables: Record<string, string> = {},
+): CompiledExpressions {
+  const variableIndex = new Map<string, number>();
+  const variableTrees: Node[] = [];
+  const names = Object.keys(variables);
+  const hasVariables = names.length > 0;
+  for (const [position, [name, source]] of Object.entries(variables).entries()) {
+    try {
+      if (!IDENTIFIER.test(name) || FUNCTIONS[name] || name === 'pi') {
+        throw new ExpressionError(`'${name}' cannot be a variable name: use letters, digits and _, not starting with a digit, and not a function name`, 0);
+      }
+      variableTrees.push(parse(String(source), bands, variableIndex, new Set(names.slice(position))));
+      variableIndex.set(name, variableTrees.length - 1);
+    } catch (error) {
+      if (error instanceof ExpressionError) error.variable = name;
+      throw error;
+    }
+  }
   const trees = sources.map((source, index) => {
     try {
-      return parse(source, bands);
+      return parse(source, bands, variableIndex, hasVariables ? new Set() : undefined);
     } catch (error) {
-      if (error instanceof ExpressionError) (error as ExpressionError & { index?: number }).index = index;
+      if (error instanceof ExpressionError) error.index = index;
       throw error;
     }
   });
   const samples: number[] = [];
+  const visited = new Set<number>();
   const collect = (node: Node): void => {
     if (node.kind === 'band' && !samples.includes(node.sample)) samples.push(node.sample);
+    if (node.kind === 'var' && !visited.has(node.index)) {
+      visited.add(node.index);
+      collect(variableTrees[node.index]);
+    }
     if (node.kind === 'neg') collect(node.arg);
     if (node.kind === 'bin') {
       collect(node.left);
@@ -326,12 +376,22 @@ export function compileExpressions(sources: string[], bands: Record<string, numb
         }
         return values;
       };
+      // Each variable is computed once, however often it is used.
+      const variableValues = new Map<number, Values>();
       const evalNode = (node: Node): Values => {
         switch (node.kind) {
           case 'num':
             return node.value;
           case 'band':
             return band(node.sample);
+          case 'var': {
+            let values = variableValues.get(node.index);
+            if (values === undefined) {
+              values = evalNode(variableTrees[node.index]);
+              variableValues.set(node.index, values);
+            }
+            return values;
+          }
           case 'neg':
             return map1(evalNode(node.arg), (x) => -x, n);
           case 'bin':
@@ -358,8 +418,8 @@ export function compileExpressions(sources: string[], bands: Record<string, numb
       return trees.map((tree) => {
         const values = evalNode(tree);
         if (typeof values === 'number') return new Float32Array(n).fill(values);
-        // A bare band reference returns the shared converted array; copy so results are independent.
-        return tree.kind === 'band' ? values.slice() : values;
+        // A bare band or variable reference returns a shared array; copy so results are independent.
+        return tree.kind === 'band' || tree.kind === 'var' ? values.slice() : values;
       });
     },
   };

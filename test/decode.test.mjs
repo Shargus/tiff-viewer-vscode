@@ -287,6 +287,50 @@ for (const name of ['bilevel_none.tif', 'bilevel_packbits.tif', 'bilevel_rle.tif
   );
 }
 
+console.log('NoData');
+await test('float32 NoData written in shortened form is still NoData', () =>
+  withFixture('float32_gdal_nodata.tif', async (tiff) => {
+    const page = tiff.pages[0];
+    assert.equal(page.info.noData, Math.fround(-3.4028234663852886e38));
+    const result = await renderFull(page);
+    assert.equal(pixel(result, 10, 10)[3], 0, 'NoData is transparent');
+    assert.equal(pixel(result, 100, 10)[3], 255);
+    assert.ok(page.stats.min >= 0, `the stretch ignores NoData (min ${page.stats.min})`);
+    return result;
+  }),
+);
+await test('zoomed out, each band averages only its own valid pixels', () =>
+  withFixture('two_band_nodata_masks.tif', async (tiff) => {
+    const page = tiff.pages[0];
+    // 256 -> 86 columns: output column 21 covers source columns 63..65, where band 2 is valid, NoData, NoData.
+    const region = await lib.readRegion(page, page.images[0], [0, 0, 256, 256], 86, 86, { samples: [0, 1] });
+    const at = (band, column) => region.data[band][10 * 86 + column];
+    assert.equal(at(0, 21), 1000);
+    assert.equal(at(1, 21), 1000, 'NoData in band 2 is not averaged in');
+    assert.ok(Number.isNaN(at(1, 30)), 'all NoData in band 2: NaN');
+    assert.ok(Number.isNaN(at(0, 5)) && Number.isNaN(at(1, 5)), 'NoData in both bands');
+    assert.equal(at(0, 30), 1000, 'band 1 valid where band 2 is not');
+  }),
+);
+
+console.log('Info panel');
+await test('every tag is listed, custom ones by number, with GDAL metadata items', () =>
+  withFixture('custom_tags.tif', async (tiff) => {
+    const info = tiff.pages[0].info;
+    const tags = Object.fromEntries(info.allTags);
+    assert.equal(tags['Software (305)'], 'my-pipeline 1.2');
+    assert.equal(tags['ImageWidth (256)'], '64');
+    assert.equal(tags['Tag 65000'], 'campaign=Mesetas 2019; operator=TM');
+    assert.equal(tags['Tag 65001'], '1.5, -2.25, 1e-7');
+    assert.equal(tags['Tag 65002'], '0, 1, 2, 250, 251, 255');
+    assert.equal(tags['Tag 65004'].length, 5000, 'long values are complete');
+    assert.ok(tags['GDAL_METADATA (42112)'].startsWith('<GDALMetadata>'));
+    assert.deepEqual(info.metadata, [['SENSOR', 'S2B'], ['QA: CLOUD', '12 & less'], ['Band 1: description', 'B04']]);
+    const ids = info.allTags.map(([label]) => Number(/(\d+)\)?$/.exec(label)[1]));
+    assert.deepEqual(ids, [...ids].sort((a, b) => a - b), 'in tag order');
+  }),
+);
+
 console.log('Structure');
 await test('multipage.tif', () =>
   withFixture('multipage.tif', async (tiff) => {

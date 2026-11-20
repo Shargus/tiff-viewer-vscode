@@ -1,4 +1,5 @@
 import { bandIdentifier } from './expression';
+import { DEFAULT_CLASS_COLOR, MAX_CLASSES, parseHexColor, type PaletteClass, type RGBA } from './palette';
 
 /**
  * A visualization preset, as stored in ~/.tiff-viewer-vscode/presets.jsonc.
@@ -18,112 +19,120 @@ export interface Preset {
   /** Single expression shown through `colormap` (used when red/green/blue are absent). */
   value?: string;
   /**
-   * Expression values mapped to black…full brightness. One range for all
-   * channels, one per channel, or "auto" (stretch with the Contrast setting).
-   * Default [0, 1].
+   * Paletted / unique values (as in QGIS): the band (or expression) whose
+   * values are listed in `classes`; values not listed are transparent.
    */
-  range?: Range | 'auto' | (Range | 'auto')[];
+  paletted?: string;
+  /** The classes of a paletted preset: value, colour ("#rrggbb" or "#rrggbbaa") and label. */
+  classes?: PaletteClass[];
+  /** Colour ramp used by Classify in a paletted preset: "random" (default) or a colour map name. */
+  colorRamp?: string;
+  /**
+   * Expression values mapped to black…full brightness: [min, max], or an
+   * automatic stretch ("auto" or "minmax": the data's min/max, "percentile":
+   * 2%/98%, "full": the data type's range). One for all channels or one per
+   * channel. Default [0, 1].
+   */
+  range?: RangeSetting | RangeSetting[];
   /** Colour map for a single expression. Default "gray". */
   colormap?: string;
-  /** Gamma applied after scaling to the range; > 1 brightens. Default 1. */
+  /** As in QGIS: brightness -255…255, contrast and saturation -100…100 (default 0), gamma 0.1…10 (> 1 brightens, default 1). */
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
   gamma?: number;
   /** Extra band names: name → 1-based band number, e.g. { "B04": 4 }. */
   bands?: Record<string, number>;
+  /**
+   * Named intermediate expressions, in order: each may use the bands and the
+   * variables before it, and the channel expressions may use all of them.
+   * Each is computed once per pixel, however often it is used.
+   */
+  variables?: Record<string, string>;
   /** Apply automatically to files that match (band count and/or file name glob). */
   match?: { bands?: number | number[]; fileName?: string | string[] };
 }
 
 export type Range = [number, number];
+/** Automatic stretches: the data's min/max, its 2nd/98th percentiles, or the data type's full range. */
+export type AutoStretch = 'minmax' | 'percentile' | 'full';
+/** A range as written in a preset ("auto" means "minmax"). */
+export type RangeSetting = Range | AutoStretch | 'auto';
+
+/** Limits and defaults of the colour adjustments (QGIS's). */
+export const ADJUSTMENTS = {
+  brightness: { min: -255, max: 255, default: 0 },
+  contrast: { min: -100, max: 100, default: 0 },
+  saturation: { min: -100, max: 100, default: 0 },
+  gamma: { min: 0.1, max: 10, default: 1 },
+} as const;
+export type Adjustment = keyof typeof ADJUSTMENTS;
 
 /** What the worker needs to render a composite. */
 export interface CompositeSpec {
   /** One expression (shown with `colormap`) or three (red, green, blue). */
   expressions: string[];
-  /** Variable name → 0-based sample index. */
+  /** Band name → 0-based sample index. */
   bands: Record<string, number>;
-  /** Range per expression; null stretches from statistics with the tone setting. */
-  ranges: (Range | null)[];
+  /** Named intermediate expressions (see Preset.variables). */
+  variables: Record<string, string>;
+  /** Range per expression: fixed, or stretched automatically from statistics. */
+  ranges: (Range | AutoStretch)[];
   colormap: string;
+  /** Paletted rendering: each listed value's colour (and label, for the readout); other values are transparent. */
+  classes?: { value: number; rgba: RGBA; label: string }[];
+  brightness: number;
+  contrast: number;
+  saturation: number;
   gamma: number;
 }
 
-const S2_LAYOUTS: Record<number, string[]> = {
-  // L1C, all bands
-  13: ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12'],
-  // L2A, all bands (no cirrus band)
-  12: ['B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12'],
-  // 10 m and 20 m bands
-  10: ['B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B11', 'B12'],
-  // 10 m bands
-  4: ['B02', 'B03', 'B04', 'B08'],
-};
+export type RenderMode = 'rgb' | 'single' | 'paletted';
 
-/**
- * Sentinel-2 band names for a band count, for files without band
- * descriptions. Descriptions in the file (GDAL band names) take precedence.
- */
-function sentinel2Bands(bandCount: number): Record<string, number> {
-  const layout = S2_LAYOUTS[bandCount] ?? S2_LAYOUTS[13];
-  return Object.fromEntries(layout.map((name, i) => [name, i + 1]));
-}
-
-/** Presets shipped with the extension; user presets with the same name replace them. */
-export function builtinPresets(bandCount: number): Preset[] {
-  const s2 = sentinel2Bands(bandCount);
-  const s1 = { VV: 1, VH: 2 };
-  return [
-    { name: 'Sentinel-2 true colour', bands: s2, red: 'B04 / 3000', green: 'B03 / 3000', blue: 'B02 / 3000' },
-    { name: 'Sentinel-2 false colour (NIR)', bands: s2, red: 'B08 / 5000', green: 'B04 / 3000', blue: 'B03 / 3000' },
-    { name: 'Sentinel-2 SWIR', bands: s2, red: 'B12 / 4000', green: 'B8A / 5000', blue: 'B04 / 3000' },
-    { name: 'Sentinel-2 NDVI', bands: s2, value: '(B08 - B04) / (B08 + B04)', range: [-1, 1], colormap: 'RdYlGn' },
-    { name: 'Sentinel-2 NDWI', bands: s2, value: '(B03 - B08) / (B03 + B08)', range: [-1, 1], colormap: 'RdBu' },
-    {
-      name: 'Sentinel-1 VV/VH (dB values)',
-      bands: s1,
-      red: 'VV',
-      green: 'VH',
-      blue: 'VV - VH',
-      range: [[-25, 0], [-30, -5], [0, 15]],
-    },
-    {
-      name: 'Sentinel-1 VV/VH (linear power)',
-      bands: s1,
-      red: '10 * log10(VV)',
-      green: '10 * log10(VH)',
-      blue: '10 * log10(VV / VH)',
-      range: [[-25, 0], [-30, -5], [0, 15]],
-    },
-  ];
-}
-
-/** User presets first, then built-ins not overridden by a user preset of the same name. */
-export function allPresets(user: Preset[], bandCount: number): { preset: Preset; builtin: boolean }[] {
-  const names = new Set(user.map((p) => p.name));
-  return [
-    ...user.map((preset) => ({ preset, builtin: false })),
-    ...builtinPresets(bandCount)
-      .filter((p) => !names.has(p.name))
-      .map((preset) => ({ preset, builtin: true })),
-  ];
+export function presetMode(preset: Preset): RenderMode {
+  if (preset.red !== undefined || preset.green !== undefined || preset.blue !== undefined) return 'rgb';
+  if (preset.paletted !== undefined) return 'paletted';
+  return 'single';
 }
 
 export function presetExpressions(preset: Preset): string[] {
+  if (presetMode(preset) === 'paletted') return [preset.paletted ?? 'b1'];
   if (preset.red !== undefined || preset.green !== undefined || preset.blue !== undefined) {
     return [preset.red ?? '0', preset.green ?? '0', preset.blue ?? '0'];
   }
   return [preset.value ?? 'b1'];
 }
 
-export function presetRanges(preset: Preset, count: number): (Range | null)[] {
+export function presetRanges(preset: Preset, count: number): (Range | AutoStretch)[] {
   const range = preset.range ?? [0, 1];
-  const one = (r: unknown): Range | null =>
-    Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && Number.isFinite(v)) ? [r[0], r[1]] : null;
-  if (range === 'auto') return new Array(count).fill(null);
-  if (Array.isArray(range) && range.length === 2 && typeof range[0] === 'number') {
-    return new Array(count).fill(one(range));
-  }
-  const list = range as (Range | 'auto')[];
+  const one = (r: unknown): Range | AutoStretch => {
+    if (Array.isArray(r) && r.length === 2 && r.every((v) => typeof v === 'number' && Number.isFinite(v))) return [r[0], r[1]];
+    return r === 'percentile' || r === 'full' ? r : 'minmax';
+  };
+  const single = typeof range === 'string' || (Array.isArray(range) && range.length === 2 && typeof range[0] === 'number');
+  if (single) return new Array(count).fill(one(range));
+  const list = range as RangeSetting[];
   return Array.from({ length: count }, (_, i) => (list[i] === undefined ? [0, 1] : one(list[i])));
+}
+
+/** A paletted preset's classes, with colours as RGBA (invalid ones grey). */
+export function presetClasses(preset: Preset): { value: number; rgba: RGBA; label: string }[] {
+  if (!Array.isArray(preset.classes)) return [];
+  return preset.classes
+    .filter((c) => c && typeof c.value === 'number' && Number.isFinite(c.value))
+    .map((c) => ({
+      value: c.value,
+      rgba: (typeof c.color === 'string' && parseHexColor(c.color)) || [...DEFAULT_CLASS_COLOR],
+      label: typeof c.label === 'string' ? c.label : '',
+    }))
+    .slice(0, MAX_CLASSES);
+}
+
+/** A preset's colour adjustment, limited to QGIS's range (the default when missing or invalid). */
+export function presetAdjustment(preset: Preset, name: Adjustment): number {
+  const { min, max, default: fallback } = ADJUSTMENTS[name];
+  const value = preset[name];
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
 }
 
 /**
@@ -149,13 +158,17 @@ export function bandVariables(bandCount: number, descriptions: (string | null)[]
 
 export function compositeSpec(preset: Preset, bandCount: number, descriptions: (string | null)[]): CompositeSpec {
   const expressions = presetExpressions(preset);
-  const gamma = typeof preset.gamma === 'number' && preset.gamma > 0 ? preset.gamma : 1;
   return {
     expressions,
     bands: bandVariables(bandCount, descriptions, preset.bands),
+    variables: preset.variables && typeof preset.variables === 'object' ? preset.variables : {},
     ranges: presetRanges(preset, expressions.length),
     colormap: expressions.length === 1 ? (preset.colormap ?? 'gray') : 'gray',
-    gamma,
+    ...(presetMode(preset) === 'paletted' ? { classes: presetClasses(preset), ranges: [[0, 1] as Range] } : {}),
+    brightness: presetAdjustment(preset, 'brightness'),
+    contrast: presetAdjustment(preset, 'contrast'),
+    saturation: presetAdjustment(preset, 'saturation'),
+    gamma: presetAdjustment(preset, 'gamma'),
   };
 }
 
@@ -188,6 +201,6 @@ export function sanitizePresets(value: unknown): Preset[] {
       typeof p === 'object' &&
       typeof (p as Preset).name === 'string' &&
       (p as Preset).name.trim() !== '' &&
-      ['red', 'green', 'blue', 'value'].some((k) => typeof (p as Record<string, unknown>)[k] === 'string'),
+      ['red', 'green', 'blue', 'value', 'paletted'].some((k) => typeof (p as Record<string, unknown>)[k] === 'string'),
   );
 }

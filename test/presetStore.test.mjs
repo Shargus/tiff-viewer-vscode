@@ -82,7 +82,7 @@ store.onDidChange((presets) => changes.push(presets.map((p) => p.name)));
 await test('lives in ~/.tiff-viewer-vscode and is created with documentation on first run', async () => {
   assert.equal(lib.PRESETS_FILE, file);
   await store.init();
-  assert.match(text(), /^\/\/ Band composite presets/);
+  assert.match(text(), /^\/\/ Band rendering presets/);
   assert.match(text(), /"presets": \[/);
   assert.deepEqual(store.get(), []);
   assert.equal(lib.vscode.watchers[0].pattern.base.fsPath, join(home, '.tiff-viewer-vscode'));
@@ -91,7 +91,7 @@ await test('lives in ~/.tiff-viewer-vscode and is created with documentation on 
 
 await test('saving adds a preset and keeps the comments', async () => {
   assert.equal(await store.save({ name: 'S2 RGB', red: 'B04 / 3000', green: 'B03 / 3000', blue: 'B02 / 3000' }), true);
-  assert.match(text(), /^\/\/ Band composite presets/, 'header kept');
+  assert.match(text(), /^\/\/ Band rendering presets/, 'header kept');
   assert.match(text(), /\/\/   "name": "Sentinel-2 true colour \(bright\)"/, 'commented example kept');
   assert.deepEqual(store.get().map((p) => p.name), ['S2 RGB']);
   await store.save({ name: 'NDVI', value: '(B08 - B04) / (B08 + B04)', range: [-1, 1], colormap: 'RdYlGn' });
@@ -138,7 +138,7 @@ await test('a syntax error keeps the last valid presets, is reported once, and b
 await test('an emptied file starts again from the template; a bare array also works', async () => {
   writeFileSync(file, '');
   await store.save({ name: 'A', value: 'b1' });
-  assert.match(text(), /^\/\/ Band composite presets/);
+  assert.match(text(), /^\/\/ Band rendering presets/);
   assert.deepEqual(store.get().map((p) => p.name), ['A']);
   writeFileSync(file, '[{ "name": "B", "value": "b2" }]');
   await store.save({ name: 'C', value: 'b3' });

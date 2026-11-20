@@ -180,13 +180,15 @@ select {
 
 #info dl {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  /* Long names (metadata keys) wrap instead of squeezing the values. */
+  grid-template-columns: fit-content(45%) 1fr;
   gap: 3px 10px;
   margin: 0;
 }
 
 #info dt {
   color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
 }
 
 #info dd {
@@ -369,4 +371,153 @@ button:disabled {
 
 button:disabled:hover {
   background: var(--vscode-button-secondaryBackground);
+}
+
+/* "auto = [stretch]" under a channel whose min and max are empty */
+.channels .auto-row {
+  grid-column: 2 / 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 4px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.channels .auto-row[hidden] {
+  display: none;
+}
+
+.channels .auto-row select {
+  height: 22px;
+}
+
+/* Brightness, contrast, saturation, gamma: label, slider, number */
+.adjustments {
+  display: grid;
+  grid-template-columns: 76px 1fr 64px;
+  gap: 6px 8px;
+  align-items: center;
+}
+
+.adjustments input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--vscode-button-background);
+}
+
+/* Long tag values in the info panel */
+#info details summary {
+  cursor: pointer;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+#info .long-value {
+  margin-top: 4px;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+/* Paletted / unique values */
+.channels.paletted .range,
+.channels.paletted .auto-row,
+.channels.paletted .col-range {
+  display: none;
+}
+
+.palette .field {
+  margin: 4px 0 8px;
+}
+
+.palette-table-wrap {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+}
+
+#paletteTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+#paletteTable th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 3px 4px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+
+#paletteTable td {
+  padding: 2px 4px;
+}
+
+#paletteTable tr.selected td {
+  background: var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.25));
+}
+
+#paletteTable td:nth-child(1) {
+  width: 20px;
+}
+
+#paletteTable td:nth-child(2) {
+  width: 72px;
+}
+
+#paletteTable td:nth-child(3) {
+  width: 40px;
+}
+
+#paletteTable td:nth-child(4) {
+  width: 52px;
+}
+
+#paletteTable input[type='color'],
+.palette-selected input[type='color'] {
+  width: 32px;
+  height: 22px;
+  padding: 0 2px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  background: var(--vscode-input-background);
+}
+
+#paletteTable input[type='number'],
+#paletteTable input[type='text'] {
+  height: 22px;
+}
+
+.palette-selected {
+  display: grid;
+  grid-template-columns: max-content 36px 56px 1fr;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.palette-selected[hidden],
+.palette-menu[hidden],
+.palette[hidden] {
+  display: none;
+}
+
+.palette-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.channels.paletted {
+  grid-template-columns: max-content 1fr;
 }

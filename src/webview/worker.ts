@@ -1,6 +1,8 @@
 import type { CompositeSpec } from '../shared/presets';
 import type { ByteRange, MainToWorker, TileSpec, ToneMode, WorkerToMain } from '../shared/protocol';
-import { channelStats, compileComposite, compositeKey, compositeSamples, compositeToRGBA, type ChannelStats } from './composite';
+import { channelStats, compileComposite, compositeSamples, compositeToRGBA, needsStats, type ChannelStats } from './composite';
+import type { Range } from '../shared/presets';
+import { MAX_CLASSES } from '../shared/palette';
 import { DecodePool, serveDecodes } from './decodePool';
 import { MessageSource } from './messageSource';
 import {
@@ -204,10 +206,11 @@ const compositeStats = new Map<string, Promise<ChannelStats[]>>();
 
 /** Per-channel statistics of a composite over the whole page, when a range is stretched automatically. */
 function ensureCompositeStats(tiff: OpenedTiff, index: number, composite: CompositeSpec): Promise<ChannelStats[] | undefined> {
-  if (composite.ranges.every((range) => range)) {
+  if (!needsStats(composite)) {
     return Promise.resolve(undefined);
   }
-  const key = `${index}|${compositeKey({ ...composite, ranges: [], colormap: '', gamma: 1 })}`;
+  // Statistics depend on the expressions only, not on how their values are shown.
+  const key = `${index}|${expressionsKey(composite)}`;
   let ready = compositeStats.get(key);
   if (!ready) {
     const page = tiff.pages[index];
@@ -219,6 +222,47 @@ function ensureCompositeStats(tiff: OpenedTiff, index: number, composite: Compos
     compositeStats.set(key, ready);
   }
   return ready;
+}
+
+function expressionsKey(composite: CompositeSpec): string {
+  return JSON.stringify([composite.expressions, composite.bands, composite.variables]);
+}
+
+/** The data type's range, for "full range" stretches (none for floating point data). */
+function typeRange(page: OpenedTiff['pages'][number]): Range | undefined {
+  if (page.format === 1) return [0, 2 ** page.bits - 1];
+  if (page.format === 2) return [-(2 ** (page.bits - 1)), 2 ** (page.bits - 1) - 1];
+  return undefined;
+}
+
+/**
+ * Evaluated composite channels of recently rendered tiles, so that changing
+ * how they are shown (ranges, colour map, brightness, contrast, saturation,
+ * gamma) only re-colours them.
+ */
+const channelCache = new Map<string, Float32Array[]>();
+let channelCacheBytes = 0;
+const CHANNEL_CACHE_BYTES = 128 * 1024 * 1024;
+
+function channelGet(key: string): Float32Array[] | undefined {
+  const value = channelCache.get(key);
+  if (value) {
+    channelCache.delete(key);
+    channelCache.set(key, value);
+  }
+  return value;
+}
+
+function channelPut(key: string, value: Float32Array[]): void {
+  const bytes = value.reduce((sum, channel) => sum + channel.byteLength, 0);
+  if (bytes > CHANNEL_CACHE_BYTES / 4 || channelCache.has(key)) return;
+  channelCache.set(key, value);
+  channelCacheBytes += bytes;
+  for (const [oldKey, old] of channelCache) {
+    if (channelCacheBytes <= CHANNEL_CACHE_BYTES) break;
+    channelCache.delete(oldKey);
+    channelCacheBytes -= old.reduce((sum, channel) => sum + channel.byteLength, 0);
+  }
 }
 
 async function renderTile(job: Job): Promise<void> {
@@ -236,23 +280,39 @@ async function renderTile(job: Job): Promise<void> {
   const samples = compiled ? compositeSamples(compiled) : page.samples;
   const stats = composite ? await ensureCompositeStats(tiff, job.page, composite) : await ensureStats(tiff, job.page);
   const { outWidth, outHeight } = spec;
+  const fullRange = typeRange(page);
+  const post_ = (rgba: Uint8ClampedArray, final: boolean) =>
+    post(
+      { type: 'tile', generation, id: spec.id, width: outWidth, height: outHeight, rgba: rgba.buffer as ArrayBuffer, final },
+      [rgba.buffer as ArrayBuffer],
+    );
+  const colourChannels = (channels: Float32Array[], n: number, final: boolean) => {
+    if (job.cancelled) throw new CancelledError();
+    post_(compositeToRGBA(composite!, channels, n, stats || undefined, fullRange, new Uint8ClampedArray(outWidth * outHeight * 4)), final);
+  };
   const send = (data: RegionResult['data'], rows: number, final: boolean) => {
     if (job.cancelled) {
       throw new CancelledError();
     }
     const n = rows * outWidth;
-    const out = new Uint8ClampedArray(outWidth * outHeight * 4);
-    const rgba =
-      composite && compiled
-        ? compositeToRGBA(composite, compiled.evaluate(data, n, page.info.noData), n, job.tone, stats || undefined, out)
-        : toRGBA(page, data, n, job.tone, out);
-    post(
-      { type: 'tile', generation, id: spec.id, width: outWidth, height: outHeight, rgba: rgba.buffer as ArrayBuffer, final },
-      [rgba.buffer as ArrayBuffer],
-    );
+    if (composite && compiled) {
+      colourChannels(compiled.evaluate(data, n, page.info.noData), n, final);
+    } else {
+      post_(toRGBA(page, data, n, job.tone, new Uint8ClampedArray(outWidth * outHeight * 4)), final);
+    }
   };
 
-  const key = rawKey(job.page, spec, samples);
+  // Class values are taken as they are (an average of classes means nothing).
+  const nearest = !!composite?.classes;
+  const key = rawKey(job.page, spec, samples) + (nearest ? '|nearest' : '');
+  const channelKey = composite ? `${key}|${expressionsKey(composite)}` : '';
+  if (composite && compiled) {
+    const channels = channelGet(channelKey);
+    if (channels) {
+      colourChannels(channels, outWidth * outHeight, true);
+      return;
+    }
+  }
   let region = rawGet(key);
   if (!region) {
     const { image, window } = chooseLevel(page, spec.window, outWidth);
@@ -260,6 +320,7 @@ async function renderTile(job: Job): Promise<void> {
     let lastSnapshot = Date.now() - SNAPSHOT_INTERVAL_MS + FIRST_SNAPSHOT_MS;
     region = await readRegion(page, image, window, outWidth, outHeight, {
       samples,
+      nearest,
       isCancelled: () => job.cancelled,
       waitTurn: () =>
         job.paused && !job.cancelled
@@ -284,7 +345,13 @@ async function renderTile(job: Job): Promise<void> {
     });
     rawPut(key, region);
   }
-  send(region.data, outHeight, true);
+  if (composite && compiled) {
+    const channels = compiled.evaluate(region.data, outWidth * outHeight, page.info.noData);
+    channelPut(channelKey, channels);
+    colourChannels(channels, outWidth * outHeight, true);
+  } else {
+    send(region.data, outHeight, true);
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -294,6 +361,65 @@ function errorMessage(error: unknown): string {
     return `Compression method ${unknownCompression[1]} is not supported.`;
   }
   return text;
+}
+
+// ---------------------------------------------------------------------------
+// Classify: the unique values of an expression over the whole page (as QGIS's paletted renderer)
+// ---------------------------------------------------------------------------
+
+/** Rows read at a time: about this many pixels. */
+const CLASSIFY_CHUNK_PIXELS = 4 * 1024 * 1024;
+let classifying: { reqId: number; cancelled: boolean } | undefined;
+
+async function classify(message: Extract<MainToWorker, { type: 'classify' }>): Promise<void> {
+  if (classifying) classifying.cancelled = true;
+  const run = { reqId: message.reqId, cancelled: false };
+  classifying = run;
+  try {
+    const tiff = await opened!;
+    const page = tiff.pages[message.page];
+    const compiled = compileComposite(message.composite);
+    const samples = compositeSamples(compiled);
+    const image = page.images[0];
+    const { width, height, noData } = page.info;
+    const rows = Math.max(1, Math.min(height, Math.floor(CLASSIFY_CHUNK_PIXELS / width)));
+    const values = new Set<number>();
+    let truncated = false;
+    let lastProgress = 0;
+    for (let y0 = 0; y0 < height && !truncated; y0 += rows) {
+      if (run.cancelled) return;
+      const y1 = Math.min(height, y0 + rows);
+      const region = await readRegion(page, image, [0, y0, width, y1], width, y1 - y0, {
+        samples,
+        isCancelled: () => run.cancelled,
+        // After the tiles in view.
+        priority: () => 1e9,
+      });
+      const channel = compiled.evaluate(region.data, width * (y1 - y0), noData)[0];
+      for (let i = 0; i < channel.length; i++) {
+        const v = channel[i];
+        if (v !== v || values.has(v)) continue;
+        if (values.size >= MAX_CLASSES) {
+          truncated = true;
+          break;
+        }
+        values.add(v);
+      }
+      const now = Date.now();
+      if (now - lastProgress > 150) {
+        lastProgress = now;
+        post({ type: 'classifyProgress', reqId: run.reqId, fraction: y1 / height });
+      }
+    }
+    if (run.cancelled) return;
+    post({ type: 'classified', reqId: run.reqId, values: [...values].sort((a, b) => a - b), truncated });
+  } catch (error) {
+    if (!(error instanceof CancelledError) && !run.cancelled) {
+      post({ type: 'classifyError', reqId: run.reqId, message: errorMessage(error) });
+    }
+  } finally {
+    if (classifying === run) classifying = undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +490,12 @@ scope.onmessage = (event) => {
       break;
     case 'pixel':
       void handlePixel(message);
+      break;
+    case 'classify':
+      void classify(message);
+      break;
+    case 'cancelClassify':
+      if (classifying?.reqId === message.reqId) classifying.cancelled = true;
       break;
   }
 };

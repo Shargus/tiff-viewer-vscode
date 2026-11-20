@@ -1,15 +1,33 @@
 import { COLORMAP_NAMES } from '../shared/colormaps';
+import {
+  colorMapToString,
+  DEFAULT_CLASS_COLOR,
+  MAX_CLASSES,
+  parseColorMap,
+  parseHexColor,
+  RANDOM_RAMP,
+  rampColors,
+  toHexColor,
+  valueLabel,
+  type RGBA,
+} from '../shared/palette';
 import { bandIdentifier as bandIdentifierOf, compileExpressions, ExpressionError } from '../shared/expression';
 import {
-  allPresets,
   bandVariables,
   compositeSpec,
   presetExpressions,
   presetMatches,
+  presetAdjustment,
+  presetClasses,
+  presetMode,
   presetRanges,
+  type RenderMode,
+  ADJUSTMENTS,
+  type Adjustment,
+  type AutoStretch,
   type CompositeSpec,
   type Preset,
-  type Range,
+  type RangeSetting,
 } from '../shared/presets';
 import type {
   FileInfo,
@@ -58,8 +76,6 @@ const canvas = $<HTMLCanvasElement>('canvas');
 const ctx = canvas.getContext('2d')!;
 const pageGroup = $<HTMLLabelElement>('pageGroup');
 const pageSelect = $<HTMLSelectElement>('page');
-const toneGroup = $<HTMLLabelElement>('toneGroup');
-const toneSelect = $<HTMLSelectElement>('tone');
 const zoomLabel = $<HTMLSpanElement>('zoomLabel');
 const infoToggle = $<HTMLButtonElement>('infoToggle');
 const infoPanel = $<HTMLElement>('info');
@@ -68,6 +84,7 @@ const progressBar = $<HTMLDivElement>('progressBar');
 const messageBox = $<HTMLDivElement>('message');
 const statusSize = $<HTMLSpanElement>('statusSize');
 const statusProgress = $<HTMLSpanElement>('statusProgress');
+const statusFileSize = $<HTMLSpanElement>('statusFileSize');
 const statusPos = $<HTMLSpanElement>('statusPos');
 const statusValue = $<HTMLSpanElement>('statusValue');
 
@@ -87,7 +104,8 @@ let info: FileInfo | undefined;
 /** Rough compressed size of one pixel, to estimate how much a view needs to read. */
 let bytesPerPixel = 1;
 let pageIndex = 0;
-let tone: ToneMode = 'minmax';
+/** The plain image is stretched min to max; stretches are chosen per channel in the Rendering panel. */
+const tone: ToneMode = 'minmax';
 
 /** Screen (CSS) pixels per image pixel, and the screen position of the image origin. */
 const view = { scale: 1, tx: 0, ty: 0 };
@@ -164,6 +182,7 @@ function stopWorkers(): void {
 
 async function start(fileSize: number): Promise<void> {
   stopWorkers();
+  statusFileSize.textContent = formatBytes(fileSize);
   info = undefined;
   clearTiles();
   showMessage(undefined);
@@ -179,6 +198,19 @@ async function start(fileSize: number): Promise<void> {
     return;
   }
   postToWorker({ type: 'open', fileSize });
+}
+
+/**
+ * Removes a tile and releases its bitmap. Its size is taken before closing:
+ * a closed ImageBitmap reports 0 × 0, which used to leave the cache size
+ * growing until every new tile was evicted on arrival (a blurry view for good).
+ */
+function removeTile(id: string): void {
+  const tile = tiles.get(id);
+  if (!tile) return;
+  tilePixels -= tile.bitmap.width * tile.bitmap.height;
+  tile.bitmap.close();
+  tiles.delete(id);
 }
 
 function clearTiles(): void {
@@ -233,6 +265,18 @@ async function onWorkerMessage(message: WorkerToMain): Promise<void> {
         }
       }
       break;
+    case 'classifyProgress':
+      if (message.reqId === classifyRequest) paletteNote.textContent = `Collecting values… ${Math.floor(message.fraction * 100)}%`;
+      break;
+    case 'classified':
+      if (message.reqId === classifyRequest) onClassified(message.values, message.truncated);
+      break;
+    case 'classifyError':
+      if (message.reqId === classifyRequest) {
+        endClassify();
+        showCompositeError(message.message);
+      }
+      break;
     case 'pixel':
       if (message.reqId === pixelReq) {
         statusValue.textContent = formatValues(message.values, message.computed);
@@ -253,11 +297,7 @@ async function onTile(message: Extract<WorkerToMain, { type: 'tile' }>): Promise
     return;
   }
   const [z, i, j] = message.id.split('/').map(Number);
-  const old = tiles.get(message.id);
-  if (old) {
-    old.bitmap.close();
-    tilePixels -= old.bitmap.width * old.bitmap.height;
-  }
+  removeTile(message.id);
   tiles.set(message.id, {
     z,
     window: tileWindow(page, z, i, j),
@@ -285,11 +325,9 @@ function evictTiles(): void {
   const page = currentPage();
   const top = page ? topLevel(page) : Infinity;
   const byAge = [...tiles.entries()].filter(([, t]) => t.z !== top).sort((a, b) => a[1].used - b[1].used);
-  for (const [id, tile] of byAge) {
+  for (const [id] of byAge) {
     if (tilePixels <= TILE_CACHE_PIXELS) break;
-    tile.bitmap.close();
-    tilePixels -= tile.bitmap.width * tile.bitmap.height;
-    tiles.delete(id);
+    removeTile(id);
   }
 }
 
@@ -333,7 +371,6 @@ function selectPage(index: number, keepView = false): void {
   }
   presetGroup.hidden = !!page.unsupported;
   compositeToggle.hidden = !!page.unsupported;
-  updateToneControls();
 
   statusSize.textContent = `${page.width} × ${page.height}`;
   renderInfo();
@@ -348,31 +385,6 @@ function selectPage(index: number, keepView = false): void {
     showProgress(0, 'Loading');
   }
   layout(0);
-}
-
-/** Shows the Contrast selector when something is stretched automatically, and its valid choices. */
-function updateToneControls(): void {
-  const page = currentPage();
-  if (!page) return;
-  const stretched = composite ? composite.ranges.some((range) => !range) : page.toneAdjustable;
-  toneGroup.hidden = !stretched;
-  const fullAvailable = !composite && page.fullRangeAvailable;
-  toneSelect.querySelector<HTMLOptionElement>('option[value="full"]')!.hidden = !fullAvailable;
-  if (tone === 'full' && !fullAvailable) {
-    tone = 'minmax';
-  }
-  toneSelect.value = tone;
-}
-
-function setTone(value: ToneMode): void {
-  tone = value;
-  // Keep the tiles on screen until they are replaced; the worker still has the
-  // decoded samples of recent tiles, so this only re-maps colours.
-  generation++;
-  requested = new Map();
-  lastRequest = '';
-  failed.clear();
-  scheduleTiles(0);
 }
 
 function topLevel(page: PageInfo): number {
@@ -513,6 +525,16 @@ function updateProgress(): void {
     total += entry.total;
   }
   showProgress(total && done < total ? done / total : undefined, 'Loading');
+  if (total && done >= total) {
+    dropStaleTiles();
+  }
+}
+
+/** Once the view is complete with the current settings, tiles rendered with older settings are no longer needed. */
+function dropStaleTiles(): void {
+  for (const [id, tile] of [...tiles]) {
+    if (tile.generation !== generation) removeTile(id);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +655,11 @@ function draw(): void {
         t.window[1] < visible[3] &&
         t.window[3] > visible[1],
     )
-    .sort((a, b) => b.z - a.z || a.generation - b.generation);
+    // Tiles rendered with older settings first, as placeholders, then the current
+    // ones on top; within each, coarse levels first and finer ones on top. (Drawing
+    // by level alone let sharp tiles left from zooming in, rendered with older
+    // settings, cover current ones for good.)
+    .sort((a, b) => (a.generation === generation ? 1 : 0) - (b.generation === generation ? 1 : 0) || b.z - a.z || a.generation - b.generation);
   if (hasTransparency(page)) {
     const [x0, y0, x1, y1] = deviceRect(page, [0, 0, page.width, page.height]);
     ctx.fillStyle = checkerPattern();
@@ -723,13 +749,22 @@ function formatValues(values: number[] | null, computed?: number[]): string {
   if (!values || !page) {
     return '';
   }
+  // NoData values (and composite values computed from them) are labelled as such.
+  const show = (v: number) => (page.noData !== null && v === page.noData ? 'NoData' : formatNumber(v));
   let text =
     values.length === 1
-      ? `${page.sampleLabels[0]}: ${formatNumber(values[0])}`
-      : values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${formatNumber(v)}`).join('  ');
+      ? `${page.sampleLabels[0]}: ${show(values[0])}`
+      : values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${show(v)}`).join('  ');
   if (computed?.length) {
     const labels = computed.length === 3 ? ['R', 'G', 'B'] : [''];
-    text = `${computed.map((v, i) => `${labels[i]}${labels[i] ? ' ' : ''}${formatNumber(v)}`).join('  ')}   ←   ${text}`;
+    const classes = composite?.classes;
+    const result = (v: number) => {
+      if (Number.isNaN(v)) return 'NoData';
+      if (!classes) return formatNumber(v);
+      const match = classes.find((c) => Math.fround(c.value) === Math.fround(v));
+      return match ? `${formatNumber(v)}${match.label && match.label !== formatNumber(v) ? ` (${match.label})` : ''}` : `${formatNumber(v)} (no class)`;
+    };
+    text = `${computed.map((v, i) => `${labels[i]}${labels[i] ? ' ' : ''}${result(v)}`).join('  ')}   ←   ${text}`;
   }
   return text;
 }
@@ -745,6 +780,9 @@ function formatBytes(bytes: number): string {
   return `${unit === 0 ? value : value.toFixed(value < 10 ? 2 : 1)} ${units[unit]}`;
 }
 
+/** Values longer than this start collapsed in the info panel. */
+const LONG_VALUE = 300;
+
 function renderInfo(): void {
   const page = currentPage();
   if (!info || !page) {
@@ -759,7 +797,19 @@ function renderInfo(): void {
       const dt = document.createElement('dt');
       dt.textContent = key;
       const dd = document.createElement('dd');
-      dd.textContent = value;
+      if (value.length > LONG_VALUE) {
+        // Long values (XML metadata, long custom strings) start collapsed.
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = `${value.slice(0, 120).replace(/\s+/g, ' ')}… (${value.length.toLocaleString()} characters)`;
+        const full = document.createElement('div');
+        full.className = 'long-value';
+        full.textContent = value;
+        details.append(summary, full);
+        dd.append(details);
+      } else {
+        dd.textContent = value;
+      }
       dl.append(dt, dd);
     }
     return [h, dl];
@@ -791,7 +841,10 @@ function renderInfo(): void {
   infoPanel.replaceChildren(
     ...section('File', fileRows),
     ...section(info.pages.length > 1 ? `Page ${pageIndex + 1}` : 'Image', pageRows),
-    ...(page.tags.length ? section('Tags', page.tags) : []),
+    ...(page.tags.length ? section('Summary', page.tags) : []),
+    ...(page.metadata.length ? section('Metadata (GDAL)', page.metadata) : []),
+    ...(page.geoKeys.length ? section('GeoTIFF keys', page.geoKeys) : []),
+    ...section(`TIFF tags (${page.allTags.length})`, page.allTags),
   );
 }
 
@@ -972,7 +1025,6 @@ $('fit').addEventListener('click', () => setFit('fit'));
 $('actual').addEventListener('click', () => zoomTo(1));
 infoToggle.addEventListener('click', toggleInfo);
 pageSelect.addEventListener('change', () => selectPage(Number(pageSelect.value)));
-toneSelect.addEventListener('change', () => setTone(toneSelect.value as ToneMode));
 
 new ResizeObserver(() => layout()).observe(stage);
 new MutationObserver(() => draw()).observe(document.body, { attributes: true, attributeFilter: ['class'] });
@@ -988,7 +1040,7 @@ const compositePanel = $<HTMLElement>('composite');
 const channelsBox = $<HTMLDivElement>('channels');
 const colormapRow = $<HTMLDivElement>('colormapRow');
 const colormapSelect = $<HTMLSelectElement>('colormap');
-const gammaInput = $<HTMLInputElement>('gamma');
+const adjustmentsBox = $<HTMLDivElement>('adjustments');
 const compositeError = $<HTMLDivElement>('compositeError');
 const deleteButton = $<HTMLButtonElement>('deletePreset');
 const bandList = $<HTMLDivElement>('bandList');
@@ -1007,7 +1059,32 @@ interface ChannelRow {
   expression: HTMLInputElement;
   min: HTMLInputElement;
   max: HTMLInputElement;
+  /** "auto = [stretch]", shown while min and max are empty. */
+  autoRow: HTMLDivElement;
+  auto: HTMLSelectElement;
 }
+
+type Mode = RenderMode;
+/** A class of the paletted mode. */
+interface PaletteRow {
+  value: number;
+  rgba: RGBA;
+  label: string;
+}
+/** Everything the panel shows for one mode, as typed (so that switching modes restores it exactly). */
+interface PanelState {
+  expressions: string[];
+  mins: string[];
+  maxs: string[];
+  autos: string[];
+  colormap: string;
+  adjustments: Record<Adjustment, string>;
+  palette?: { rows: PaletteRow[]; ramp: string; note: string };
+}
+/** The panel of the mode not shown, kept while the image is open. */
+const modeStates: Partial<Record<Mode, PanelState>> = {};
+let currentMode: Mode = 'rgb';
+let panelFilled = false;
 let rows: ChannelRow[] = [];
 let lastExpression: HTMLInputElement | undefined;
 let editTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1021,16 +1098,17 @@ for (const name of COLORMAP_NAMES) {
   }
 }
 
-function findPreset(name: string): { preset: Preset; builtin: boolean } | undefined {
-  return allPresets(userPresets, currentPage()?.samplesPerPixel ?? 0).find((p) => p.preset.name === name);
+function findPreset(name: string): Preset | undefined {
+  return userPresets.find((p) => p.name === name);
 }
 
 function initialSelection(page: PageInfo): Selection {
-  if (remembered && (remembered.kind !== 'preset' || findPreset(remembered.name))) {
+  // Unsaved composites last only while the image is open; presets and the plain image are remembered.
+  if (remembered?.kind === 'none' || (remembered?.kind === 'preset' && findPreset(remembered.name))) {
     return remembered;
   }
-  const match = allPresets(userPresets, page.samplesPerPixel).find((p) => presetMatches(p.preset, fileName, page.samplesPerPixel));
-  return match ? { kind: 'preset', name: match.preset.name } : { kind: 'none' };
+  const match = userPresets.find((p) => presetMatches(p, fileName, page.samplesPerPixel));
+  return match ? { kind: 'preset', name: match.name } : { kind: 'none' };
 }
 
 /** A starting point for a new composite: the first three bands, or the first band, by their names in the file. */
@@ -1050,14 +1128,17 @@ function applySelection(next: Selection, remember: boolean): void {
   if (!page) return;
   let preset: Preset | undefined;
   if (next.kind === 'preset') {
-    preset = findPreset(next.name)?.preset;
+    preset = findPreset(next.name);
     if (!preset) next = { kind: 'none' };
   } else if (next.kind === 'custom') {
     preset = next.preset;
   }
   selection = next;
-  editing = structuredClone(preset ?? defaultPreset(page));
-  fillEditor();
+  if (preset || !panelFilled) {
+    // Choosing the plain image keeps the panel as it is, so that custom settings stay at hand.
+    editing = structuredClone(preset ?? defaultPreset(page));
+    fillEditor();
+  }
   updatePresetSelect();
   if (remember) {
     vscode.postMessage({ type: 'remember', selection });
@@ -1082,12 +1163,17 @@ function applySelection(next: Selection, remember: boolean): void {
 
 function validate(spec: CompositeSpec): { message: string; index?: number } | undefined {
   try {
-    compileExpressions(spec.expressions, spec.bands);
+    compileExpressions(spec.expressions, spec.bands, spec.variables);
     return undefined;
   } catch (error) {
-    const index = (error as { index?: number }).index;
-    const channel = spec.expressions.length === 3 && index !== undefined ? `${['Red', 'Green', 'Blue'][index]}: ` : '';
-    return { message: channel + (error instanceof ExpressionError ? error.message : String(error)), index };
+    const { index, variable } = error as ExpressionError;
+    const where =
+      variable !== undefined
+        ? `Variable '${variable}' (in the presets file): `
+        : spec.expressions.length === 3 && index !== undefined
+          ? `${['Red', 'Green', 'Blue'][index]}: `
+          : '';
+    return { message: where + (error instanceof ExpressionError ? error.message : String(error)), index };
   }
 }
 
@@ -1096,7 +1182,6 @@ function setComposite(spec: CompositeSpec | undefined): void {
     return;
   }
   composite = spec;
-  updateToneControls();
   // Like a tone change: keep the tiles on screen until replaced.
   generation++;
   requested = new Map();
@@ -1107,7 +1192,6 @@ function setComposite(spec: CompositeSpec | undefined): void {
 }
 
 function updatePresetSelect(): void {
-  const page = currentPage();
   const options: HTMLElement[] = [];
   const option = (value: string, text: string) => {
     const o = document.createElement('option');
@@ -1115,53 +1199,127 @@ function updatePresetSelect(): void {
     o.textContent = text;
     return o;
   };
-  options.push(option('none', page && page.samplesPerPixel > 1 ? 'Image colours' : 'Image'));
-  const presets = allPresets(userPresets, page?.samplesPerPixel ?? 0);
-  for (const [label, builtin] of [['My presets', false], ['Built-in', true]] as const) {
+  const fallback = option('none', 'Default');
+  // What the file itself describes: its RGB or palette colours, or its first band in grey.
+  fallback.title = "The file's own rendering: RGB and palette images in their colours, other images' first band in grey";
+  options.push(fallback);
+  if (userPresets.length) {
     const group = document.createElement('optgroup');
-    group.label = label;
-    group.append(...presets.filter((p) => p.builtin === builtin).map((p) => option(`preset:${p.preset.name}`, p.preset.name)));
-    if (group.childElementCount) options.push(group);
+    group.label = 'Presets';
+    group.append(...userPresets.map((p) => option(`preset:${p.name}`, p.name)));
+    options.push(group);
   }
   if (selection.kind === 'custom') {
     options.push(option('custom', editing.name ? `${editing.name} (modified)` : 'Custom'));
   }
   presetSelect.replaceChildren(...options);
   presetSelect.value = selection.kind === 'preset' ? `preset:${selection.name}` : selection.kind;
-  const user = selection.kind === 'preset' && findPreset(selection.name)?.builtin === false;
-  deleteButton.disabled = !user;
-  deleteButton.title = user ? `Delete "${(selection as { name: string }).name}" from the presets file` : 'Built-in presets cannot be deleted';
+  const saved = selection.kind === 'preset';
+  deleteButton.disabled = !saved;
+  deleteButton.title = saved ? `Delete "${(selection as { name: string }).name}" from the presets file` : 'Select a saved preset to delete it';
 }
 
-function isRgb(): boolean {
-  return compositePanel.querySelector<HTMLInputElement>('input[name="mode"]:checked')!.value === 'rgb';
+function checkedMode(): Mode {
+  return compositePanel.querySelector<HTMLInputElement>('input[name="mode"]:checked')!.value as Mode;
 }
 
-function formatRangeValue(value: number | undefined): string {
-  return value === undefined ? '' : String(value);
-}
+const AUTO_LABELS: [AutoStretch, string][] = [
+  ['minmax', 'Min / Max'],
+  ['percentile', '2% / 98%'],
+  ['full', 'Full range'],
+];
 
-/** Writes `editing` into the editor fields. */
+/** Writes `editing` into the editor fields (the panel of its mode; the other mode's panel is kept). */
 function fillEditor(): void {
   const expressions = presetExpressions(editing);
   const ranges = presetRanges(editing, expressions.length);
-  const rgb = expressions.length === 3;
-  compositePanel.querySelector<HTMLInputElement>(`input[name="mode"][value="${rgb ? 'rgb' : 'single'}"]`)!.checked = true;
-  buildRows(rgb);
+  const mode: Mode = presetMode(editing);
+  if (panelFilled && mode !== currentMode) modeStates[currentMode] = captureState();
+  setMode(mode);
+  if (mode === 'paletted') {
+    setPalette(presetClasses(editing).map((c) => ({ value: c.value, rgba: c.rgba, label: c.label })), editing.colorRamp ?? RANDOM_RAMP, '');
+  }
   rows.forEach((row, i) => {
+    const range = ranges[i];
     row.expression.value = expressions[i];
-    row.min.value = formatRangeValue(ranges[i]?.[0]);
-    row.max.value = formatRangeValue(ranges[i]?.[1]);
+    row.min.value = Array.isArray(range) ? String(range[0]) : '';
+    row.max.value = Array.isArray(range) ? String(range[1]) : '';
+    row.auto.value = Array.isArray(range) ? 'minmax' : range;
   });
-  colormapRow.hidden = rgb;
+  updateAutoRows();
   colormapSelect.value = COLORMAP_NAMES.includes((editing.colormap ?? 'gray').replace(/_r$/, '')) ? (editing.colormap ?? 'gray') : 'gray';
-  gammaInput.value = String(editing.gamma ?? 1);
+  for (const name of ADJUSTMENT_NAMES) setAdjustment(name, presetAdjustment(editing, name));
+  panelFilled = true;
   renderBandList();
 }
 
-function buildRows(rgb: boolean): void {
-  const labels = rgb ? [['R', 'r', 'Red'], ['G', 'g', 'Green'], ['B', 'b', 'Blue']] : [['V', '', 'Value']];
+/** Shows the panel of a mode with empty rows. */
+function setMode(mode: Mode): void {
+  currentMode = mode;
+  compositePanel.querySelector<HTMLInputElement>(`input[name="mode"][value="${mode}"]`)!.checked = true;
+  buildRows(mode);
+  colormapRow.hidden = mode !== 'single';
+  paletteBox.hidden = mode !== 'paletted';
+  rangeHint.hidden = mode === 'paletted';
+  channelsBox.classList.toggle('paletted', mode === 'paletted');
+}
+
+function captureState(): PanelState {
+  return {
+    expressions: rows.map((row) => row.expression.value),
+    mins: rows.map((row) => row.min.value),
+    maxs: rows.map((row) => row.max.value),
+    autos: rows.map((row) => row.auto.value),
+    colormap: colormapSelect.value,
+    adjustments: Object.fromEntries(ADJUSTMENT_NAMES.map((name) => [name, adjustmentInputs[name].number.value])) as Record<Adjustment, string>,
+    palette: currentMode === 'paletted' ? { rows: paletteRows.map((r) => ({ ...r, rgba: [...r.rgba] as RGBA })), ramp: paletteRamp.value, note: paletteNoteText } : undefined,
+  };
+}
+
+function restoreState(state: PanelState): void {
+  rows.forEach((row, i) => {
+    row.expression.value = state.expressions[i] ?? '';
+    row.min.value = state.mins[i] ?? '';
+    row.max.value = state.maxs[i] ?? '';
+    row.auto.value = state.autos[i] ?? 'minmax';
+  });
+  updateAutoRows();
+  colormapSelect.value = state.colormap;
+  for (const name of ADJUSTMENT_NAMES) {
+    adjustmentInputs[name].number.value = state.adjustments[name];
+    syncSlider(name);
+  }
+  if (state.palette) setPalette(state.palette.rows, state.palette.ramp, state.palette.note);
+}
+
+/** A mode's panel the first time it is shown: the file's first bands, stretched automatically (Min / Max). */
+function defaultState(mode: Mode, page: PageInfo): PanelState {
+  const preset = defaultPreset(page);
+  const names = presetExpressions(preset);
+  const expressions = mode === 'rgb' ? [names[0], names[1] ?? names[0], names[2] ?? names[0]] : [names[0]];
+  // As in QGIS, a paletted rendering starts from the image's own colour table when it has one.
+  const fromLayer = page.palette ? limitClasses(layerClasses(page.palette), "The image's colour table") : { rows: [], note: '' };
+  const palette = mode === 'paletted' ? { rows: fromLayer.rows, ramp: RANDOM_RAMP, note: fromLayer.note } : undefined;
+  return {
+    palette,
+    expressions,
+    mins: expressions.map(() => ''),
+    maxs: expressions.map(() => ''),
+    autos: expressions.map(() => 'minmax'),
+    colormap: 'gray',
+    adjustments: Object.fromEntries(ADJUSTMENT_NAMES.map((name) => [name, formatAdjustment(name, ADJUSTMENTS[name].default)])) as Record<Adjustment, string>,
+  };
+}
+
+function buildRows(mode: Mode): void {
+  const labels =
+    mode === 'rgb'
+      ? [['R', 'r', 'Red'], ['G', 'g', 'Green'], ['B', 'b', 'Blue']]
+      : mode === 'paletted'
+        ? [['V', '', 'Band (or expression) whose values are listed']]
+        : [['V', '', 'Value']];
   channelsBox.querySelectorAll('.row-cell').forEach((cell) => cell.remove());
+  const fullAvailable = currentPage()?.sampleFormat !== 'Floating point';
   rows = labels.map(([short, cls, long]) => {
     const label = document.createElement('span');
     label.className = `row-cell channel-label ${cls}`;
@@ -1175,19 +1333,167 @@ function buildRows(rgb: boolean): void {
       el.title = title;
       el.spellcheck = false;
       el.setAttribute('aria-label', title);
-      el.addEventListener('input', onEdit);
+      el.addEventListener('input', () => onEdit());
       return el;
     };
-    const row = {
+    const autoRow = document.createElement('div');
+    autoRow.className = 'row-cell auto-row';
+    const autoLabel = document.createElement('span');
+    autoLabel.textContent = 'auto =';
+    const auto = document.createElement('select');
+    auto.setAttribute('aria-label', `${long}: automatic stretch`);
+    for (const [value, text] of AUTO_LABELS) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = text;
+      if (value === 'full' && !fullAvailable) {
+        option.disabled = true;
+        option.title = 'Floating point data has no fixed range';
+      }
+      auto.append(option);
+    }
+    auto.title = 'Min / Max: the lowest and highest values of the image. 2% / 98%: ignores the darkest and brightest 2%. Full range: the whole range of the data type (e.g. 0 to 65535).';
+    auto.addEventListener('change', () => onEdit(0));
+    autoRow.append(autoLabel, auto);
+    const row: ChannelRow = {
       expression: input('text', 'expression', 'e.g. B04 / 3000', `${long} expression`),
-      min: input('number', 'range', 'auto', `${long}: value shown as black`),
-      max: input('number', 'range', 'auto', `${long}: value shown at full brightness`),
+      min: input('number', 'range', 'auto', `${long}: value shown as black (empty: automatic)`),
+      max: input('number', 'range', 'auto', `${long}: value shown at full brightness (empty: automatic)`),
+      autoRow,
+      auto,
     };
+    for (const field of [row.min, row.max]) field.addEventListener('input', updateAutoRows);
     row.expression.addEventListener('focus', () => (lastExpression = row.expression));
-    channelsBox.append(label, row.expression, row.min, row.max);
+    channelsBox.append(label, row.expression, row.min, row.max, autoRow);
     return row;
   });
   lastExpression = rows[0].expression;
+}
+
+/** "auto = …" appears under a channel whose min and max are both empty. */
+function updateAutoRows(): void {
+  for (const row of rows) row.autoRow.hidden = !!(row.min.value.trim() || row.max.value.trim());
+}
+
+// --- Brightness, contrast, saturation, gamma: a slider and a number each ---
+
+const ADJUSTMENT_NAMES = Object.keys(ADJUSTMENTS) as Adjustment[];
+const ADJUSTMENT_LABELS: Record<Adjustment, [string, string]> = {
+  brightness: ['Brightness', 'Added to every colour component, -255 to 255 (as in QGIS)'],
+  contrast: ['Contrast', 'Spreads colours away from (or towards) mid-grey, -100 to 100 (as in QGIS)'],
+  saturation: ['Saturation', 'Colour intensity, -100 (grey) to 100 (as in QGIS)'],
+  gamma: ['Gamma', 'Above 1 brightens dark tones, below 1 darkens them, 0.1 to 10 (as in QGIS)'],
+};
+const adjustmentInputs = {} as Record<Adjustment, { slider: HTMLInputElement; number: HTMLInputElement }>;
+
+/** Gamma's slider is logarithmic (0.1 … 1 … 10 evenly spaced); the others are linear. */
+const toSlider = (name: Adjustment, value: number) => (name === 'gamma' ? Math.round(Math.log10(value) * 100) : value);
+const fromSlider = (name: Adjustment, position: number) => (name === 'gamma' ? Number((10 ** (position / 100)).toFixed(2)) : position);
+const formatAdjustment = (name: Adjustment, value: number) => (name === 'gamma' ? String(Number(value.toFixed(2))) : String(Math.round(value)));
+
+for (const name of ADJUSTMENT_NAMES) {
+  const { min, max, default: fallback } = ADJUSTMENTS[name];
+  const [text, title] = ADJUSTMENT_LABELS[name];
+  const label = document.createElement('label');
+  label.textContent = text;
+  label.title = title;
+  label.htmlFor = `adjust-${name}`;
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = String(toSlider(name, min));
+  slider.max = String(toSlider(name, max));
+  slider.step = '1';
+  slider.title = title;
+  slider.setAttribute('aria-label', text);
+  const number = document.createElement('input');
+  number.type = 'number';
+  number.id = `adjust-${name}`;
+  number.min = String(min);
+  number.max = String(max);
+  number.step = name === 'gamma' ? '0.05' : '1';
+  number.title = title;
+  slider.addEventListener('input', () => {
+    number.value = formatAdjustment(name, fromSlider(name, Number(slider.value)));
+    onEdit(120);
+  });
+  number.addEventListener('input', () => {
+    syncSlider(name);
+    onEdit();
+  });
+  // Double-click a slider to reset it.
+  slider.addEventListener('dblclick', () => {
+    setAdjustment(name, fallback);
+    onEdit(0);
+  });
+  adjustmentsBox.append(label, slider, number);
+  adjustmentInputs[name] = { slider, number };
+}
+
+function setAdjustment(name: Adjustment, value: number): void {
+  adjustmentInputs[name].number.value = formatAdjustment(name, value);
+  syncSlider(name);
+}
+
+function syncSlider(name: Adjustment): void {
+  const { slider, number } = adjustmentInputs[name];
+  const value = Number(number.value);
+  const { min, max } = ADJUSTMENTS[name];
+  if (number.value.trim() && Number.isFinite(value)) slider.value = String(toSlider(name, Math.min(max, Math.max(min, value))));
+}
+
+$('resetAdjustments').addEventListener('click', () => {
+  for (const name of ADJUSTMENT_NAMES) setAdjustment(name, ADJUSTMENTS[name].default);
+  onEdit(0);
+});
+
+/** Reads the editor fields into a preset, or returns an error message. */
+function readEditor(): { preset: Preset } | { error: string; field?: HTMLInputElement } {
+  const preset: Preset = { name: editing.name };
+  if (editing.bands) preset.bands = editing.bands;
+  // Variables are edited in the presets file; keep them.
+  if (editing.variables) preset.variables = editing.variables;
+  if (editing.match) preset.match = editing.match;
+  const expressions = rows.map((row) => row.expression.value.trim());
+  if (currentMode === 'rgb') {
+    [preset.red, preset.green, preset.blue] = expressions;
+  } else if (currentMode === 'paletted') {
+    preset.paletted = expressions[0];
+    preset.classes = [...paletteRows]
+      .sort((a, b) => a.value - b.value)
+      .map((c) => ({ value: c.value, color: toHexColor(c.rgba), ...(c.label ? { label: c.label } : {}) }));
+    if (paletteRamp.value !== RANDOM_RAMP) preset.colorRamp = paletteRamp.value;
+  } else {
+    preset.value = expressions[0];
+    preset.colormap = colormapSelect.value;
+  }
+  const ranges: RangeSetting[] = [];
+  for (const row of currentMode === 'paletted' ? [] : rows) {
+    const lo = row.min.value.trim();
+    const hi = row.max.value.trim();
+    if (!lo && !hi) {
+      const auto = row.auto.value as AutoStretch;
+      ranges.push(auto === 'minmax' ? 'auto' : auto);
+    } else if (!lo || !hi || !Number.isFinite(Number(lo)) || !Number.isFinite(Number(hi))) {
+      return { error: 'Give both a minimum and a maximum, or leave both empty to stretch automatically.', field: lo ? row.max : row.min };
+    } else {
+      ranges.push([Number(lo), Number(hi)]);
+    }
+  }
+  const same = ranges.every((r) => JSON.stringify(r) === JSON.stringify(ranges[0]));
+  if (currentMode === 'paletted') {
+    // Classes have no range.
+  } else if (!same) preset.range = ranges;
+  else if (JSON.stringify(ranges[0]) !== '[0,1]') preset.range = ranges[0];
+  for (const name of ADJUSTMENT_NAMES) {
+    const field = adjustmentInputs[name].number;
+    const { min, max, default: fallback } = ADJUSTMENTS[name];
+    const value = field.value.trim() === '' ? fallback : Number(field.value);
+    if (!Number.isFinite(value) || value < min || value > max) {
+      return { error: `${ADJUSTMENT_LABELS[name][0]} must be a number from ${min} to ${max}.`, field };
+    }
+    if (value !== fallback) preset[name] = value;
+  }
+  return { preset };
 }
 
 function renderBandList(): void {
@@ -1196,7 +1502,18 @@ function renderBandList(): void {
   const vars = bandVariables(page.samplesPerPixel, page.bandNames, editing.bands);
   const names: string[][] = Array.from({ length: page.samplesPerPixel }, () => []);
   for (const [name, index] of Object.entries(vars)) names[index].push(name);
+  const variableButtons = Object.entries(editing.variables ?? {}).map(([name, source]) => {
+    const button = document.createElement('button');
+    const tag = document.createElement('span');
+    tag.className = 'index';
+    tag.textContent = 'var';
+    button.append(tag, name);
+    button.title = `Variable defined in the preset: ${name} = ${source}`;
+    button.addEventListener('click', () => insertBand(name));
+    return button;
+  });
   bandList.replaceChildren(
+    ...variableButtons,
     ...names.map((list, i) => {
       // Prefer the file's name for the band (B04, VV), then a preset's, then b4.
       const described = page.bandNames[i] ? list.find((n) => vars[n] === i && n !== `b${i + 1}` && n === bandIdentifierOf(page.bandNames[i]!)) : undefined;
@@ -1223,40 +1540,304 @@ function insertBand(name: string): void {
   onEdit();
 }
 
-/** Reads the editor fields into a preset, or returns an error message. */
-function readEditor(): { preset: Preset } | { error: string; field?: HTMLInputElement } {
-  const preset: Preset = { name: editing.name };
-  if (editing.bands) preset.bands = editing.bands;
-  if (editing.match) preset.match = editing.match;
-  const expressions = rows.map((row) => row.expression.value.trim());
-  if (isRgb()) {
-    [preset.red, preset.green, preset.blue] = expressions;
+// --- Paletted / unique values (QGIS's paletted renderer) ---
+
+const paletteBox = $<HTMLDivElement>('paletteBox');
+const rangeHint = $<HTMLParagraphElement>('rangeHint');
+const paletteRamp = $<HTMLSelectElement>('paletteRamp');
+const paletteBody = document.querySelector<HTMLTableSectionElement>('#paletteTable tbody')!;
+const paletteSelectAll = $<HTMLInputElement>('paletteSelectAll');
+const paletteNote = $<HTMLParagraphElement>('paletteNote');
+const paletteSelected = $<HTMLDivElement>('paletteSelected');
+const paletteClassify = $<HTMLButtonElement>('paletteClassify');
+const paletteMenu = $<HTMLDivElement>('paletteMenu');
+const paletteMore = $<HTMLButtonElement>('paletteMore');
+
+let paletteRows: PaletteRow[] = [];
+const paletteSelection = new Set<PaletteRow>();
+let paletteNoteText = '';
+let classifyRequest = 0;
+
+{
+  const option = (value: string, text: string) => Object.assign(document.createElement('option'), { value, textContent: text });
+  paletteRamp.append(option(RANDOM_RAMP, 'Random colors'));
+  for (const name of COLORMAP_NAMES) paletteRamp.append(option(name, name), option(`${name}_r`, `${name} (reversed)`));
+}
+
+/** Classes from a TIFF colour table (16-bit reds, greens, blues), one per index, as QGIS's "Load Classes from Layer". */
+function layerClasses(colorMap: number[]): PaletteRow[] {
+  const size = Math.floor(colorMap.length / 3);
+  return Array.from({ length: size }, (_, i) => ({
+    value: i,
+    rgba: [Math.round(colorMap[i] / 257), Math.round(colorMap[size + i] / 257), Math.round(colorMap[2 * size + i] / 257), 255] as RGBA,
+    label: valueLabel(i),
+  }));
+}
+
+/** At most MAX_CLASSES classes; the note says when some were dropped. */
+function limitClasses(rows: PaletteRow[], source: string): { rows: PaletteRow[]; note: string } {
+  if (rows.length <= MAX_CLASSES) return { rows, note: '' };
+  return {
+    rows: rows.slice(0, MAX_CLASSES),
+    note: `${source} has ${rows.length.toLocaleString()} classes; only the first ${MAX_CLASSES} are kept (the limit).`,
+  };
+}
+
+function setPalette(rows: PaletteRow[], ramp: string, note: string): void {
+  paletteRows = rows.slice(0, MAX_CLASSES);
+  paletteSelection.clear();
+  paletteRamp.value = ramp;
+  paletteNoteText = note;
+  renderPaletteTable();
+}
+
+function cssColor(rgba: RGBA): string {
+  return toHexColor([rgba[0], rgba[1], rgba[2], 255]);
+}
+
+/** The table, sorted by value as in QGIS. */
+function renderPaletteTable(): void {
+  paletteRows.sort((a, b) => a.value - b.value);
+  paletteBody.replaceChildren(
+    ...paletteRows.map((row) => {
+      const tr = document.createElement('tr');
+      tr.classList.toggle('selected', paletteSelection.has(row));
+      const cell = (...children: HTMLElement[]) => {
+        const td = document.createElement('td');
+        td.append(...children);
+        return td;
+      };
+      const select = Object.assign(document.createElement('input'), { type: 'checkbox', checked: paletteSelection.has(row), title: 'Select' });
+      select.addEventListener('change', () => {
+        if (select.checked) paletteSelection.add(row);
+        else paletteSelection.delete(row);
+        tr.classList.toggle('selected', select.checked);
+        updatePaletteSelection();
+      });
+      const value = Object.assign(document.createElement('input'), { type: 'number', step: 'any', value: valueLabel(row.value), title: 'Value' });
+      value.addEventListener('change', () => {
+        const v = Number(value.value);
+        if (value.value.trim() === '' || !Number.isFinite(v)) {
+          value.setAttribute('aria-invalid', 'true');
+          return;
+        }
+        value.removeAttribute('aria-invalid');
+        if (row.label === valueLabel(row.value)) row.label = valueLabel(v);
+        row.value = v;
+        renderPaletteTable();
+        onEdit(0);
+      });
+      const color = Object.assign(document.createElement('input'), { type: 'color', value: cssColor(row.rgba), title: 'Colour' });
+      color.addEventListener('input', () => {
+        const rgba = parseHexColor(color.value);
+        if (rgba) row.rgba = [rgba[0], rgba[1], rgba[2], row.rgba[3]];
+        onEdit(120);
+      });
+      const opacity = Object.assign(document.createElement('input'), { type: 'number', min: '0', max: '100', step: '1', value: String(Math.round((row.rgba[3] / 255) * 100)), title: 'Opacity (%)' });
+      opacity.addEventListener('input', () => {
+        const v = Number(opacity.value);
+        if (!Number.isFinite(v)) return;
+        row.rgba[3] = Math.round((Math.min(100, Math.max(0, v)) / 100) * 255);
+        onEdit();
+      });
+      const label = Object.assign(document.createElement('input'), { type: 'text', value: row.label, title: 'Label', spellcheck: false });
+      label.addEventListener('input', () => {
+        row.label = label.value;
+        onEdit();
+      });
+      tr.append(cell(select), cell(value), cell(color), cell(opacity), cell(label));
+      return tr;
+    }),
+  );
+  if (!paletteRows.length) {
+    paletteNote.textContent = paletteNoteText || 'No classes yet: click Classify to list the values of the band (values not listed are transparent).';
   } else {
-    preset.value = expressions[0];
-    preset.colormap = colormapSelect.value;
+    const full = paletteRows.length >= MAX_CLASSES;
+    paletteNote.textContent = [
+      `${paletteRows.length} class${paletteRows.length === 1 ? '' : 'es'}${full ? ` (the limit is ${MAX_CLASSES})` : ''}.`,
+      paletteNoteText,
+    ]
+      .filter(Boolean)
+      .join(' ');
   }
-  const ranges: (Range | 'auto')[] = [];
-  for (const row of rows) {
-    const lo = row.min.value.trim();
-    const hi = row.max.value.trim();
-    if (!lo && !hi) {
-      ranges.push('auto');
-    } else if (!lo || !hi || !Number.isFinite(Number(lo)) || !Number.isFinite(Number(hi))) {
-      return { error: 'Give both a minimum and a maximum, or leave both empty to stretch automatically.', field: lo ? row.max : row.min };
-    } else {
-      ranges.push([Number(lo), Number(hi)]);
-    }
+  const add = $('paletteAdd') as HTMLButtonElement;
+  add.disabled = paletteRows.length >= MAX_CLASSES;
+  add.title = add.disabled ? `At most ${MAX_CLASSES} classes` : 'Add a value';
+  updatePaletteSelection();
+}
+
+/** "N selected": colour, opacity and label for all of them (QGIS's Change Color… / Opacity… / Label…). */
+function updatePaletteSelection(): void {
+  for (const row of paletteSelection) if (!paletteRows.includes(row)) paletteSelection.delete(row);
+  const count = paletteSelection.size;
+  paletteSelected.hidden = count === 0;
+  paletteSelectAll.checked = count > 0 && count === paletteRows.length;
+  paletteSelectAll.indeterminate = count > 0 && count < paletteRows.length;
+  ($('paletteDelete') as HTMLButtonElement).disabled = count === 0;
+  if (count === 0) return;
+  const first = [...paletteSelection][0];
+  $('paletteSelectedCount').textContent = `${count} selected:`;
+  ($('paletteSelectedColor') as HTMLInputElement).value = cssColor(first.rgba);
+  ($('paletteSelectedOpacity') as HTMLInputElement).value = String(Math.round((first.rgba[3] / 255) * 100));
+}
+
+function paletteChanged(): void {
+  renderPaletteTable();
+  onEdit(0);
+}
+
+paletteSelectAll.addEventListener('change', () => {
+  paletteSelection.clear();
+  if (paletteSelectAll.checked) for (const row of paletteRows) paletteSelection.add(row);
+  renderPaletteTable();
+});
+$('paletteSelectedColor').addEventListener('input', (event) => {
+  const rgba = parseHexColor((event.target as HTMLInputElement).value);
+  if (!rgba) return;
+  for (const row of paletteSelection) row.rgba = [rgba[0], rgba[1], rgba[2], row.rgba[3]];
+  renderPaletteTable();
+  onEdit(120);
+});
+$('paletteSelectedOpacity').addEventListener('change', (event) => {
+  const v = Number((event.target as HTMLInputElement).value);
+  if (!Number.isFinite(v)) return;
+  for (const row of paletteSelection) row.rgba[3] = Math.round((Math.min(100, Math.max(0, v)) / 100) * 255);
+  paletteChanged();
+});
+$('paletteSelectedLabel').addEventListener('change', (event) => {
+  const text = (event.target as HTMLInputElement).value;
+  for (const row of paletteSelection) row.label = text;
+  paletteChanged();
+});
+
+// Changing the ramp re-colours every class, as in QGIS.
+paletteRamp.addEventListener('change', () => {
+  const colors = rampColors(paletteRamp.value, paletteRows.length);
+  paletteRows.sort((a, b) => a.value - b.value).forEach((row, i) => (row.rgba = [...colors[i]] as RGBA));
+  paletteChanged();
+});
+
+// "+": the next whole value after the largest, coloured from the ramp's end (as QGIS).
+$('paletteAdd').addEventListener('click', () => {
+  const max = paletteRows.reduce((m, r) => Math.max(m, Math.trunc(r.value)), -Infinity);
+  const value = Math.max(0, max + 1);
+  const ramp = paletteRamp.value;
+  const rgba: RGBA = ramp === RANDOM_RAMP ? rampColors(ramp, 1)[0] : (rampColors(ramp, 2)[1] ?? [...DEFAULT_CLASS_COLOR]);
+  const row: PaletteRow = { value, rgba: [...rgba] as RGBA, label: valueLabel(value) };
+  paletteRows.push(row);
+  paletteSelection.clear();
+  paletteSelection.add(row);
+  paletteChanged();
+});
+$('paletteDelete').addEventListener('click', () => {
+  paletteRows = paletteRows.filter((row) => !paletteSelection.has(row));
+  paletteSelection.clear();
+  paletteChanged();
+});
+$('paletteDeleteAll').addEventListener('click', () => {
+  paletteRows = [];
+  paletteSelection.clear();
+  paletteNoteText = '';
+  paletteChanged();
+});
+
+paletteMore.addEventListener('click', () => {
+  paletteMenu.hidden = !paletteMenu.hidden;
+  paletteMore.setAttribute('aria-expanded', String(!paletteMenu.hidden));
+  ($('paletteLoadLayer') as HTMLButtonElement).disabled = !currentPage()?.palette;
+  $('paletteLoadLayer').title = currentPage()?.palette ? "Use the image's own colour table" : 'This image has no colour table';
+});
+const closeMenu = () => {
+  paletteMenu.hidden = true;
+  paletteMore.setAttribute('aria-expanded', 'false');
+};
+$('paletteLoadLayer').addEventListener('click', () => {
+  closeMenu();
+  const palette = currentPage()?.palette;
+  if (!palette) return;
+  ({ rows: paletteRows, note: paletteNoteText } = limitClasses(layerClasses(palette), "The image's colour table"));
+  paletteSelection.clear();
+  paletteChanged();
+});
+$('paletteLoadFile').addEventListener('click', () => {
+  closeMenu();
+  vscode.postMessage({ type: 'loadColorMap' });
+});
+$('paletteExport').addEventListener('click', () => {
+  closeMenu();
+  const base = fileName.replace(/\.[^.]*$/, '') || 'colormap';
+  vscode.postMessage({ type: 'exportColorMap', text: colorMapToString(paletteRows.map((r) => ({ value: r.value, color: r.rgba, label: r.label }))), fileName: `${base}.clr` });
+});
+
+/** Colour names in a colour map file ("red", "#ff0000"), read by the browser. */
+function parseCssColor(name: string): RGBA | undefined {
+  const hex = parseHexColor(name);
+  if (hex) return hex;
+  const probe = document.createElement('canvas').getContext('2d')!;
+  probe.fillStyle = '#010203';
+  probe.fillStyle = name;
+  const resolved = String(probe.fillStyle);
+  return resolved === '#010203' && name.toLowerCase() !== '#010203' ? undefined : parseHexColor(resolved);
+}
+
+function onColorMapLoaded(text: string, file: string): void {
+  const classes = parseColorMap(text, parseCssColor);
+  if (!classes.length) {
+    showCompositeError(`Could not interpret ${file} as a raster colour table.`);
+    return;
   }
-  const same = ranges.every((r) => JSON.stringify(r) === JSON.stringify(ranges[0]));
-  if (same && ranges[0] === 'auto') preset.range = 'auto';
-  else if (same && JSON.stringify(ranges[0]) !== '[0,1]') preset.range = ranges[0];
-  else if (!same) preset.range = ranges;
-  const gamma = Number(gammaInput.value);
-  if (gammaInput.value.trim() && (!Number.isFinite(gamma) || gamma <= 0)) {
-    return { error: 'Gamma must be a positive number.', field: gammaInput };
+  if (currentMode !== 'paletted') return;
+  ({ rows: paletteRows, note: paletteNoteText } = limitClasses(
+    classes.map((c) => ({ value: c.value, rgba: c.color, label: c.label })),
+    file,
+  ));
+  paletteSelection.clear();
+  paletteChanged();
+}
+
+// Classify: the band's unique values, keeping the colours and labels of values already listed (as QGIS).
+paletteClassify.addEventListener('click', () => {
+  if (classifyRequest) {
+    postToWorker({ type: 'cancelClassify', reqId: classifyRequest });
+    endClassify();
+    return;
   }
-  if (gammaInput.value.trim() && gamma !== 1) preset.gamma = gamma;
-  return { preset };
+  const page = currentPage();
+  const expression = rows[0]?.expression.value.trim() ?? '';
+  if (!page || !expression) return;
+  const spec = compositeSpec({ name: '', value: expression, variables: editing.variables, bands: editing.bands }, page.samplesPerPixel, page.bandNames);
+  const error = validate(spec);
+  if (error) {
+    showCompositeError(error.message, 0);
+    return;
+  }
+  classifyRequest = ++requestCounter;
+  paletteClassify.textContent = 'Cancel';
+  paletteClassify.title = 'Stop collecting values';
+  paletteNote.textContent = 'Collecting values… 0%';
+  postToWorker({ type: 'classify', reqId: classifyRequest, page: pageIndex, composite: spec });
+});
+
+function endClassify(): void {
+  classifyRequest = 0;
+  paletteClassify.textContent = 'Classify';
+  paletteClassify.title = "List the band's unique values (keeps the colours and labels of values already listed)";
+  renderPaletteTable();
+}
+
+function onClassified(values: number[], truncated: boolean): void {
+  const colors = rampColors(paletteRamp.value, values.length);
+  const existing = new Map(paletteRows.map((row) => [row.value, row]));
+  paletteRows = values.map((value, i) => {
+    const old = existing.get(value);
+    return old ? { value, rgba: old.rgba, label: old.label } : { value, rgba: [...colors[i]] as RGBA, label: valueLabel(value) };
+  });
+  paletteSelection.clear();
+  paletteNoteText = truncated
+    ? `The band has more than ${MAX_CLASSES} different values; the first ${MAX_CLASSES} found are listed. For continuous data, Single band suits better.`
+    : '';
+  endClassify();
+  onEdit(0);
 }
 
 function showCompositeError(message: string | undefined, index?: number, field?: HTMLInputElement): void {
@@ -1268,7 +1849,7 @@ function showCompositeError(message: string | undefined, index?: number, field?:
 }
 
 /** Any change in the editor: validate, then show it (debounced) as an unsaved composite. */
-function onEdit(): void {
+function onEdit(delay = 300): void {
   clearTimeout(editTimer);
   editTimer = setTimeout(() => {
     const page = currentPage();
@@ -1288,9 +1869,8 @@ function onEdit(): void {
     editing = result.preset;
     selection = { kind: 'custom', preset: result.preset };
     updatePresetSelect();
-    vscode.postMessage({ type: 'remember', selection });
     setComposite(spec);
-  }, 300);
+  }, delay);
 }
 
 function showComposite(show: boolean): void {
@@ -1312,22 +1892,17 @@ presetSelect.addEventListener('change', () => {
 });
 for (const radio of compositePanel.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
   radio.addEventListener('change', () => {
-    // Keep the expressions (one becomes the red channel, or red becomes the
-    // single one); ranges start again at 0–1, since they rarely carry over (NDVI's -1…1).
-    const expressions = rows.map((row) => row.expression.value);
-    const rgb = isRgb();
-    buildRows(rgb);
-    colormapRow.hidden = rgb;
-    rows.forEach((row, i) => {
-      row.expression.value = rgb ? (expressions[i] ?? expressions[0]) : expressions[0];
-      row.min.value = '0';
-      row.max.value = '1';
-    });
-    onEdit();
+    // Each mode keeps its own panel while the image is open: switching back restores it.
+    const page = currentPage();
+    const next = checkedMode();
+    if (!page || next === currentMode) return;
+    modeStates[currentMode] = captureState();
+    setMode(next);
+    restoreState(modeStates[next] ?? defaultState(next, page));
+    onEdit(0);
   });
 }
-colormapSelect.addEventListener('change', onEdit);
-gammaInput.addEventListener('input', onEdit);
+colormapSelect.addEventListener('change', () => onEdit(0));
 $('saveComposite').addEventListener('click', () => {
   const result = readEditor();
   const page = currentPage();
@@ -1345,11 +1920,12 @@ $('saveComposite').addEventListener('click', () => {
 
 /**
  * Keeps only the preset band names the expressions use and the file does not
- * provide itself, so that a saved preset does not carry a built-in's whole layout.
+ * provide itself, so that a saved preset carries only the band names it needs.
  */
 function withUsedBandNames(preset: Preset, page: PageInfo): Preset {
   if (!preset.bands) return preset;
-  const used = new Set(presetExpressions(preset).flatMap((e) => e.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []));
+  const sources = [...presetExpressions(preset), ...Object.values(preset.variables ?? {})];
+  const used = new Set(sources.flatMap((e) => String(e).match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []));
   const fromFile = bandVariables(page.samplesPerPixel, page.bandNames);
   const bands = Object.fromEntries(Object.entries(preset.bands).filter(([name]) => used.has(name) && !(name in fromFile)));
   const { bands: _, ...rest } = preset;
@@ -1375,6 +1951,9 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
       userPresets = message.presets;
       remembered = message.remembered;
       void start(message.fileSize);
+      break;
+    case 'colorMapLoaded':
+      onColorMapLoaded(message.text, message.fileName);
       break;
     case 'presets':
       userPresets = message.presets;

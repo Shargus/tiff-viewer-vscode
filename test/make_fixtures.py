@@ -44,6 +44,27 @@ f32[0:40, 0:40] = np.nan
 tifffile.imwrite(path('float32_nan_zstd_pred.tif'), f32, compression='zstd', predictor=True, tile=(64, 64))
 tifffile.imwrite(path('float64_gray.tif'), f32.astype(np.float64))
 
+# GDAL NoData: float32 with the lowest float32 written in shortened form (as older GDAL does),
+# and two bands whose NoData masks differ (band 2 has NoData where band 1 is valid).
+f32nd = np.linspace(0, 100, 256 * 256, dtype=np.float32).reshape(256, 256)
+f32nd[:, :64] = np.float32(-3.4028234663852886e38)
+tifffile.imwrite(path('float32_gdal_nodata.tif'), f32nd, tile=(128, 128), extratags=[(42113, 's', 0, '-3.40282346638529e+38', True)])
+masks = np.full((2, 256, 256), 1000, dtype=np.uint16)
+masks[1, :, 64:128] = 0
+masks[:, :, :32] = 0
+tifffile.imwrite(path('two_band_nodata_masks.tif'), masks, planarconfig='separate', tile=(128, 128), extratags=[(42113, 's', 0, '0', True)])
+
+# Custom (private) tags of several types, and GDAL metadata items, for the info panel.
+tags = np.arange(64 * 64, dtype=np.uint16).reshape(64, 64)
+tifffile.imwrite(path('custom_tags.tif'), tags, tile=(32, 32), software='my-pipeline 1.2', extratags=[
+    (65000, 's', 0, 'campaign=Mesetas 2019; operator=TM', True),
+    (65001, 'd', 3, (1.5, -2.25, 1e-7), True),
+    (65002, 'B', 6, bytes([0, 1, 2, 250, 251, 255]), True),
+    (65004, 's', 0, 'x' * 5000, True),
+    (42112, 's', 0, '<GDALMetadata><Item name="SENSOR">S2B</Item><Item name="CLOUD" domain="QA">12 &amp; less</Item>'
+                    '<Item name="DESCRIPTION" sample="0" role="description">B04</Item></GDALMetadata>', True),
+])
+
 # Multi-page with different sizes
 with tifffile.TiffWriter(path('multipage.tif')) as tw:
     tw.write(rgb8, photometric='rgb')

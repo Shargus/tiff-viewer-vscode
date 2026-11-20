@@ -97,7 +97,7 @@
     "commands": [
       {
         "command": "tiffViewer.openPresets",
-        "title": "Open Band Composite Presets File",
+        "title": "Open Rendering Presets File",
         "category": "TIFF"
       }
     ]

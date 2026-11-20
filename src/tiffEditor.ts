@@ -171,6 +171,40 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
           case 'openPresetsFile':
             void this.presets.open();
             break;
+          case 'loadColorMap': {
+            const [uri] =
+              (await vscode.window.showOpenDialog({
+                title: 'Load Colour Map from File',
+                canSelectMany: false,
+                defaultUri: vscode.Uri.joinPath(document.uri, '..'),
+                filters: { 'Colour maps': ['clr', 'txt'], 'All files': ['*'] },
+              })) ?? [];
+            if (uri) {
+              try {
+                const text = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+                void post({ type: 'colorMapLoaded', text, fileName: uri.path.slice(uri.path.lastIndexOf('/') + 1) });
+              } catch (error) {
+                void vscode.window.showErrorMessage(`Could not read ${uri.fsPath}: ${(error as Error).message ?? error}`);
+              }
+            }
+            break;
+          }
+          case 'exportColorMap': {
+            const uri = await vscode.window.showSaveDialog({
+              title: 'Export Colour Map to File',
+              defaultUri: vscode.Uri.joinPath(document.uri, '..', message.fileName),
+              filters: { 'Colour maps': ['clr'] },
+            });
+            if (uri) {
+              const target = /\.clr$/i.test(uri.path) ? uri : uri.with({ path: `${uri.path}.clr` });
+              try {
+                await vscode.workspace.fs.writeFile(target, new TextEncoder().encode(message.text + '\n'));
+              } catch (error) {
+                void vscode.window.showErrorMessage(`Could not write ${target.fsPath}: ${(error as Error).message ?? error}`);
+              }
+            }
+            break;
+          }
           case 'read':
             try {
               const data = await Promise.all(message.ranges.map((range) => document.read(range)));
@@ -224,19 +258,11 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <button id="fit" title="Fit to window (0)">Fit</button>
       <button id="actual" title="Actual size (1)">1:1</button>
     </div>
-    <label class="group" id="toneGroup" hidden title="How sample values are mapped to screen brightness">
-      <span>Contrast</span>
-      <select id="tone">
-        <option value="minmax">Min – max</option>
-        <option value="percentile">2% – 98%</option>
-        <option value="full">Full range</option>
-      </select>
-    </label>
-    <label class="group" id="presetGroup" hidden title="Band composite preset">
+    <label class="group" id="presetGroup" hidden title="Rendering preset">
       <span>Bands</span>
       <select id="preset"></select>
     </label>
-    <button id="compositeToggle" hidden title="Edit the band composite (B)" aria-pressed="false">Composite</button>
+    <button id="compositeToggle" hidden title="Band rendering: RGB, single band or paletted (B)" aria-pressed="false">Rendering</button>
     <span class="spacer"></span>
     <button id="infoToggle" title="Image information (I)" aria-pressed="false">Info</button>
   </div>
@@ -247,21 +273,55 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <div id="message" hidden></div>
     </div>
     <aside id="composite" class="panel" hidden>
-      <h3>Band composite</h3>
-      <div class="mode" role="radiogroup" aria-label="Composite type">
+      <h3>Band rendering</h3>
+      <div class="mode" role="radiogroup" aria-label="Render type">
         <label><input type="radio" name="mode" value="rgb" checked> RGB</label>
         <label><input type="radio" name="mode" value="single"> Single band</label>
+        <label title="Paletted / unique values, as in QGIS: a colour for each value"><input type="radio" name="mode" value="paletted"> Paletted</label>
       </div>
       <div id="channels" class="channels">
-        <span></span><span class="col">Expression</span><span class="col">Min</span><span class="col">Max</span>
+        <span></span><span class="col">Expression</span><span class="col col-range">Min</span><span class="col col-range">Max</span>
       </div>
       <div class="field" id="colormapRow" hidden>
         <span>Colour map</span><select id="colormap"></select>
       </div>
-      <div class="field">
-        <span>Gamma</span><input id="gamma" type="number" min="0.1" max="10" step="0.1" value="1">
+      <p class="hint" id="rangeHint">Leave min and max empty to stretch automatically.</p>
+      <div id="paletteBox" class="palette" hidden>
+        <div class="field">
+          <span>Colour ramp</span><select id="paletteRamp" title="Colours given to classes by Classify and +, and to all classes when changed"></select>
+        </div>
+        <div class="palette-table-wrap">
+          <table id="paletteTable">
+            <thead><tr>
+              <th><input type="checkbox" id="paletteSelectAll" aria-label="Select all classes" title="Select all"></th>
+              <th>Value</th><th>Colour</th><th title="Opacity, %">Opacity</th><th>Label</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint" id="paletteNote"></p>
+        <div id="paletteSelected" class="palette-selected" hidden>
+          <span id="paletteSelectedCount"></span>
+          <input type="color" id="paletteSelectedColor" title="Change colour of the selected classes">
+          <input type="number" id="paletteSelectedOpacity" min="0" max="100" step="1" title="Change opacity (%) of the selected classes">
+          <input type="text" id="paletteSelectedLabel" placeholder="label" title="Change label of the selected classes (Enter)">
+        </div>
+        <div class="buttons">
+          <button id="paletteClassify" title="List the band's unique values (keeps the colours and labels of values already listed)">Classify</button>
+          <button id="paletteAdd" title="Add a value">+</button>
+          <button id="paletteDelete" title="Delete the selected classes">−</button>
+          <button id="paletteDeleteAll" title="Delete all classes">Delete all</button>
+          <button id="paletteMore" title="Advanced options" aria-expanded="false">…</button>
+        </div>
+        <div id="paletteMenu" class="palette-menu" hidden>
+          <button id="paletteLoadLayer" title="Use the image's own colour table">Load classes from layer</button>
+          <button id="paletteLoadFile">Load colour map from file…</button>
+          <button id="paletteExport">Export colour map to file…</button>
+        </div>
       </div>
-      <p class="hint">Leave min and max empty to stretch automatically (see Contrast).</p>
+      <h3>Adjustments</h3>
+      <div id="adjustments" class="adjustments"></div>
+      <div class="buttons"><button id="resetAdjustments" title="Brightness, contrast and saturation 0, gamma 1">Reset adjustments</button></div>
       <div id="compositeError" class="error" role="alert" hidden></div>
       <div class="buttons">
         <button id="saveComposite" title="Save these settings as a preset">Save as preset…</button>
@@ -284,6 +344,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
     <span id="statusValue"></span>
     <span class="spacer"></span>
     <span id="statusProgress"></span>
+    <span id="statusFileSize" title="File size"></span>
   </div>
   <script nonce="${nonce}">window.TIFF_WORKER_URL = ${JSON.stringify(asset('dist', 'webview', 'worker.js').toString())};</script>
   <script nonce="${nonce}" src="${asset('dist', 'webview', 'main.js')}"></script>

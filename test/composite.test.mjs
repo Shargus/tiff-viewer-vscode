@@ -1,7 +1,7 @@
 // Band composite tests: expressions, presets, GDAL band descriptions, LZW and
 // composite rendering. Runs under Node:  npm test
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
@@ -16,6 +16,7 @@ await esbuild.build({
       `export * from './src/shared/expression.ts';`,
       `export * from './src/shared/presets.ts';`,
       `export * from './src/shared/colormaps.ts';`,
+      `export * from './src/shared/palette.ts';`,
       `export * from './src/webview/composite.ts';`,
       `export { lzwDecode } from './src/webview/lzw.ts';`,
       `export { parseBandDescriptions, openTiff, readRegion } from './src/webview/tiff.ts';`,
@@ -132,30 +133,98 @@ await test('band variables: bN, then preset names, then descriptions win', () =>
 await test('ranges: single, per channel, auto', () => {
   assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1' }, 3), [[0, 1], [0, 1], [0, 1]]);
   assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: [0, 3000] }, 3), [[0, 3000], [0, 3000], [0, 3000]]);
-  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: 'auto' }, 3), [null, null, null]);
-  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: [[-25, 0], 'auto'] }, 3), [[-25, 0], null, [0, 1]]);
+  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: 'auto' }, 3), ['minmax', 'minmax', 'minmax']);
+  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: 'percentile' }, 1), ['percentile']);
+  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: [[-25, 0], 'auto', 'full'] }, 3), [[-25, 0], 'minmax', 'full']);
+  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: [[-25, 0], 'percentile'] }, 3), [[-25, 0], 'percentile', [0, 1]]);
+  assert.deepEqual(lib.presetRanges({ name: 'x', red: 'b1', range: ['bogus', [1]] }, 2), ['minmax', 'minmax'], 'invalid entries stretch automatically');
 });
 await test('expressions: RGB with defaults, or single value', () => {
   assert.deepEqual(lib.presetExpressions({ name: 'x', red: 'b1' }), ['b1', '0', '0']);
   assert.deepEqual(lib.presetExpressions({ name: 'x', value: 'b2' }), ['b2']);
 });
-await test('built-in Sentinel-2 presets compile for common layouts', () => {
-  for (const count of [4, 10, 12, 13]) {
-    for (const preset of lib.builtinPresets(count).filter((p) => p.name.startsWith('Sentinel-2'))) {
-      if (count === 4 && /SWIR/.test(preset.name)) continue; // no SWIR bands in 10 m stacks
-      const spec = lib.compositeSpec(preset, count, new Array(count).fill(null));
-      lib.compileExpressions(spec.expressions, spec.bands);
-    }
-  }
-  const l2a = lib.compositeSpec(lib.builtinPresets(12)[2], 12, new Array(12).fill(null));
-  assert.equal(l2a.bands.B12, 11);
+await test('variables: in order, computed once, shadowing bands, with errors naming the variable', () => {
+  const bands = { x: 0, b1: 0 };
+  const compiled = lib.compileExpressions(['sq + 1', 'sq', 'x'], bands, { sq: 'x * x', x: '2 * b1' });
+  assert.deepEqual(compiled.samples, [0]);
+  const [a, b, c] = compiled.evaluate([Float32Array.of(3, -1)], 2, null);
+  // `x` is redefined as a variable after `sq` was defined, so sq uses the band x.
+  assert.deepEqual(Array.from(a), [10, 2]);
+  assert.deepEqual(Array.from(b), [9, 1]);
+  assert.deepEqual(Array.from(c), [6, -2], 'the variable shadows the band');
+  b[0] = 99;
+  assert.deepEqual(Array.from(a), [10, 2], 'results do not share storage with variables');
+  const bad = (variables, pattern, name) =>
+    assert.throws(
+      () => lib.compileExpressions(['b1'], bands, variables),
+      (e) => e instanceof lib.ExpressionError && pattern.test(e.message) && e.variable === name,
+    );
+  bad({ u: 'later + 1', later: 'b1' }, /'later' is defined after this variable/, 'u');
+  bad({ '2x': 'b1' }, /cannot be a variable name/, '2x');
+  bad({ log: 'b1' }, /cannot be a variable name/, 'log');
+  assert.throws(() => lib.compileExpressions(['nope'], bands, { v: 'b1' }), (e) => e.index === 0 && /Unknown band or variable/.test(e.message));
 });
-await test('user presets replace built-ins of the same name', () => {
-  const all = lib.allPresets([{ name: 'Sentinel-2 NDVI', value: 'b1' }], 13);
-  const ndvi = all.filter((p) => p.preset.name === 'Sentinel-2 NDVI');
-  assert.equal(ndvi.length, 1);
-  assert.equal(ndvi[0].builtin, false);
-  assert.equal(all[0].preset.name, 'Sentinel-2 NDVI', 'user presets first');
+await test('presets carry variables into the composite', () => {
+  const spec = lib.compositeSpec({ name: 'v', value: 'ndvi', variables: { ndvi: '(b2 - b1) / (b2 + b1)' } }, 2, [null, null]);
+  assert.deepEqual(spec.variables, { ndvi: '(b2 - b1) / (b2 + b1)' });
+  const compiled = lib.compileExpressions(spec.expressions, spec.bands, spec.variables);
+  const bands = [Uint16Array.of(1000), Uint16Array.of(3000)];
+  assert.deepEqual(Array.from(compiled.evaluate(compiled.samples.map((i) => bands[i]), 1, null)[0]), [0.5]);
+});
+await test('the Sentinel Hub simple true colour preset matches its evalscript', () => {
+  // custom-scripts.sentinel-hub.com/sentinel-2/true_color: [B04, B03, B02] * 2.5 (reflectance), clipped to 0…1.
+  const script = (B04, B03, B02) => [B04, B03, B02].map((v) => Math.min(1, Math.max(0, v * 2.5)));
+  const preset = { name: 'simple', red: 'B04', green: 'B03', blue: 'B02', range: [1000, 5000] };
+  const names = ['B02', 'B03', 'B04'];
+  const spec = lib.compositeSpec(preset, 3, names);
+  const compiled = lib.compileExpressions(spec.expressions, spec.bands, spec.variables);
+  const steps = [1, 500, 1000, 1001, 1500, 2000, 2345, 3000, 4000, 4999, 5000, 6000, 20000];
+  const n = steps.length ** 3;
+  const bands = names.map(() => new Uint16Array(n));
+  let i = 0;
+  for (const r of steps) for (const g of steps) for (const b of steps) { bands[2][i] = r; bands[1][i] = g; bands[0][i] = b; i++; }
+  const rgba = lib.compositeToRGBA(spec, compiled.evaluate(compiled.samples.map((s) => bands[s]), n, 0), n);
+  let worst = 0;
+  for (let p = 0; p < n; p++) {
+    // Reflectance from processing baseline 04.00 on: (DN - 1000) / 10000.
+    const expected = script((bands[2][p] - 1000) / 10000, (bands[1][p] - 1000) / 10000, (bands[0][p] - 1000) / 10000);
+    for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs(rgba[p * 4 + c] - expected[c] * 255));
+  }
+  assert.ok(worst <= 0.51, `largest difference ${worst.toFixed(3)} of 255 (only 8-bit rounding is allowed)`);
+});
+await test('the Copernicus Browser Sentinel-2 L2A true colour preset matches its evalscript', () => {
+  // Copernicus Browser, Sentinel-2 L2A, layer 1_TRUE_COLOR (verbatim, inputs in reflectance).
+  const maxR = 3.0, midR = 0.13, sat = 1.2, gamma = 1.8;
+  const gOff = 0.01, gOffPow = Math.pow(gOff, gamma), gOffRange = Math.pow(1 + gOff, gamma) - gOffPow;
+  const clip = (s) => (s < 0 ? 0 : s > 1 ? 1 : s);
+  const adj = (a, tx, ty, maxC) => { const ar = clip(a / maxC, 0, 1); return (ar * (ar * (tx / maxC + ty - 1) - ty)) / (ar * ((2 * tx) / maxC - 1) - tx / maxC); };
+  const adjGamma = (b) => (Math.pow(b + gOff, gamma) - gOffPow) / gOffRange;
+  const sAdj = (a) => adjGamma(adj(a, midR, 1, maxR));
+  const satEnh = (r, g, b) => { const avgS = ((r + g + b) / 3.0) * (1 - sat); return [clip(avgS + r * sat), clip(avgS + g * sat), clip(avgS + b * sat)]; };
+  const sRGB = (c) => (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 0.41666666666) - 0.055);
+  const script = (B04, B03, B02) => satEnh(sAdj(B04), sAdj(B03), sAdj(B02)).map(sRGB);
+
+  const preset = JSON.parse(readFileSync(join(root, 'test', 'copernicus-true-colour.json'), 'utf8'));
+  const names = ['B01', 'B02', 'B03', 'B04'];
+  const spec = lib.compositeSpec(preset, 4, names);
+  const compiled = lib.compileExpressions(spec.expressions, spec.bands, spec.variables);
+  // Combinations of 1…36000: below the 1000 offset (negative reflectance), up to beyond
+  // maxR (reflectance 3 = 31000), plus no data (0 in every band, as in Sentinel-2 L2A).
+  const steps = [1, 500, 1000, 1005, 1020, 1050, 1100, 1200, 1400, 1700, 2000, 2300, 2800, 3500, 4500, 6000, 9000, 13000, 21000, 31000, 36000];
+  const n = steps.length ** 3 + 1;
+  const bands = names.map(() => new Uint16Array(n));
+  let i = 0;
+  for (const r of steps) for (const g of steps) for (const b of steps) { bands[3][i] = r; bands[2][i] = g; bands[1][i] = b; i++; }
+  const data = compiled.samples.map((sample) => bands[sample]);
+  const rgba = lib.compositeToRGBA(spec, compiled.evaluate(data, n, 0), n);
+  let worst = 0;
+  for (let p = 0; p < n - 1; p++) {
+    // Reflectance in L2A products from processing baseline 04.00 on: (DN - 1000) / 10000.
+    const expected = script((bands[3][p] - 1000) / 10000, (bands[2][p] - 1000) / 10000, (bands[1][p] - 1000) / 10000);
+    for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs(rgba[p * 4 + c] - expected[c] * 255));
+  }
+  assert.ok(worst <= 0.51, `largest difference ${worst.toFixed(3)} of 255 (only 8-bit rounding is allowed)`);
+  assert.equal(rgba[(n - 1) * 4 + 3], 0, 'no data (0 in every band) is transparent');
 });
 await test('auto-apply rules', () => {
   const p = (match) => ({ name: 'x', value: 'b1', match });
@@ -248,29 +317,186 @@ await test('grows the output when the expected size is too small, and stops at t
 });
 
 console.log('Composite rendering');
-await test('RGB with ranges, gamma and no data', () => {
-  const spec = { expressions: ['b1', 'b2', 'b3'], bands: {}, ranges: [[0, 100], [0, 100], [0, 100]], colormap: 'gray', gamma: 1 };
+const spec = (extra) => ({ expressions: ['b1', 'b2', 'b3'], bands: {}, variables: {}, ranges: [[0, 100], [0, 100], [0, 100]], colormap: 'gray', brightness: 0, contrast: 0, saturation: 0, gamma: 1, ...extra });
+await test('RGB with ranges and no data', () => {
   const nan = NaN;
-  const rgba = lib.compositeToRGBA(spec, [Float32Array.of(0, 50, 200, nan), Float32Array.of(100, 50, -5, nan), Float32Array.of(25, nan, 0, nan)], 4, 'minmax');
+  const rgba = lib.compositeToRGBA(spec(), [Float32Array.of(0, 50, 200, nan), Float32Array.of(100, 50, -5, nan), Float32Array.of(25, nan, 0, nan)], 4);
   assert.deepEqual(Array.from(rgba.subarray(0, 4)), [0, 255, 64, 255]);
   assert.deepEqual(Array.from(rgba.subarray(4, 8)), [128, 128, 0, 255], 'a single NaN channel shows as 0');
   assert.deepEqual(Array.from(rgba.subarray(8, 12)), [255, 0, 0, 255], 'clamped');
   assert.equal(rgba[15], 0, 'all NaN: transparent');
-  const bright = lib.compositeToRGBA({ ...spec, gamma: 2 }, [Float32Array.of(25), Float32Array.of(25), Float32Array.of(25)], 1, 'minmax');
-  assert.ok(Math.abs(bright[0] - 128) <= 1, 'gamma 2 maps 0.25 to 0.5');
 });
-await test('single band through a colour map, with auto range from statistics', () => {
-  const spec = { expressions: ['b1'], bands: {}, ranges: [null], colormap: 'viridis', gamma: 1 };
+await test('automatic stretches per channel: min/max, 2%/98%, full range of the data type', () => {
+  const values = Float32Array.from({ length: 101 }, (_, i) => i * 10);
+  const stats = lib.channelStats([values, values, values]);
+  assert.deepEqual([stats[0].min, stats[0].max, stats[0].p02, stats[0].p98], [0, 1000, 20, 980]);
+  const s = spec({ ranges: ['minmax', 'percentile', 'full'] });
+  assert.deepEqual(lib.channelRanges(s, stats, [0, 65535]), [[0, 1000], [20, 980], [0, 65535]]);
+  assert.deepEqual(lib.channelRanges(s, stats, undefined), [[0, 1000], [20, 980], [0, 1000]], 'no full range (float data): min/max');
+  const rgba = lib.compositeToRGBA(s, [values, values, values], 101, stats, [0, 65535]);
+  assert.deepEqual(Array.from(rgba.subarray(4 * 2, 4 * 2 + 3)), [Math.round((20 / 1000) * 255), 0, Math.round((20 / 65535) * 255)]);
+  assert.equal(lib.needsStats(spec({ ranges: [[0, 1], 'full', [0, 1]] })), false);
+  assert.equal(lib.needsStats(spec({ ranges: [[0, 1], 'percentile', [0, 1]] })), true);
+});
+await test('single band through a colour map', () => {
   const values = Float32Array.from({ length: 101 }, (_, i) => i);
   const stats = lib.channelStats([values]);
-  assert.deepEqual([stats[0].min, stats[0].max, stats[0].p02, stats[0].p98], [0, 100, 2, 98]);
-  const rgba = lib.compositeToRGBA(spec, [values], 101, 'minmax', stats);
+  const s = { ...spec({ expressions: ['b1'], ranges: ['minmax'], colormap: 'viridis' }) };
+  const rgba = lib.compositeToRGBA(s, [values], 101, stats);
   const table = lib.colormapTable('viridis');
   assert.deepEqual(Array.from(rgba.subarray(0, 3)), Array.from(table.subarray(0, 3)));
   assert.deepEqual(Array.from(rgba.subarray(400, 403)), Array.from(table.subarray(765, 768)));
-  const pct = lib.compositeToRGBA(spec, [values], 101, 'percentile', stats);
+  const pct = lib.compositeToRGBA({ ...s, ranges: ['percentile'] }, [values], 101, stats);
   assert.deepEqual(Array.from(pct.subarray(8, 11)), Array.from(table.subarray(0, 3)), 'p02 maps to the bottom');
   assert.deepEqual(Array.from(lib.colormapTable('viridis_r').subarray(0, 3)), Array.from(table.subarray(765, 768)));
+});
+
+// QGIS, step by step (src/core/raster/qgsbrightnesscontrastfilter.cpp, qgshuesaturationfilter.cpp):
+// the renderer's 8-bit colour, then brightness/contrast/gamma, then saturation in HSL.
+function qgisPipeline([r, g, b], { brightness, contrast, gamma, saturation }) {
+  const f = ((contrast + 100) / 100) ** 2;
+  const bc = (c) => {
+    const base = (((c / 255 - 0.5) * f + 0.5) * 255 + brightness) / 255;
+    return Math.min(255, Math.max(0, 255 * Math.max(0, base) ** (1 / gamma)));
+  };
+  let rgb = [bc(r), bc(g), bc(b)].map((c) => c / 255);
+  if (saturation !== 0) {
+    // RGB -> HSL -> RGB, with QGIS's saturation formula in between.
+    const max = Math.max(...rgb), min = Math.min(...rgb), l = (max + min) / 2, d = max - min;
+    if (d > 0) {
+      let h;
+      const [R, G, B] = rgb;
+      if (max === R) h = ((G - B) / d) % 6; else if (max === G) h = (B - R) / d + 2; else h = (R - G) / d + 4;
+      h *= 60;
+      if (h < 0) h += 360;
+      let s = Math.min(1, d / (1 - Math.abs(2 * l - 1)));
+      const k = saturation / 100 + 1;
+      s = k < 1 ? s * k : 1 - (1 - s) ** (k * k);
+      const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
+      const [r1, g1, b1] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+      rgb = [r1 + m, g1 + m, b1 + m];
+    }
+  }
+  return rgb.map((c) => c * 255);
+}
+await test('brightness, contrast, saturation and gamma behave as in QGIS', () => {
+  let seed = 11;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const n = 400;
+  const channels = [0, 1, 2].map(() => Float32Array.from({ length: n }, () => Math.round(rand() * 100)));
+  const settings = [
+    { brightness: 40, contrast: 0, saturation: 0, gamma: 1 },
+    { brightness: -80, contrast: 30, saturation: 0, gamma: 1 },
+    { brightness: 0, contrast: -60, saturation: 0, gamma: 1 },
+    { brightness: 0, contrast: 0, saturation: 0, gamma: 2.2 },
+    { brightness: 0, contrast: 0, saturation: 0, gamma: 0.4 },
+    { brightness: 0, contrast: 0, saturation: 60, gamma: 1 },
+    { brightness: 0, contrast: 0, saturation: -50, gamma: 1 },
+    { brightness: 0, contrast: 0, saturation: -100, gamma: 1 },
+    { brightness: 25, contrast: 40, saturation: 35, gamma: 1.3 },
+  ];
+  for (const adj of settings) {
+    const rgba = lib.compositeToRGBA(spec(adj), channels, n);
+    let worst = 0;
+    for (let i = 0; i < n; i++) {
+      const expected = qgisPipeline(channels.map((c) => (c[i] / 100) * 255), adj);
+      for (let c = 0; c < 3; c++) worst = Math.max(worst, Math.abs(rgba[i * 4 + c] - expected[c]));
+    }
+    // QGIS works on whole numbers between its steps; up to 1.5 levels of rounding difference.
+    assert.ok(worst <= 1.5, `${JSON.stringify(adj)}: largest difference ${worst.toFixed(2)}`);
+  }
+  const grey = lib.compositeToRGBA(spec({ saturation: -100 }), channels, n);
+  for (let i = 0; i < n; i++) assert.ok(Math.max(grey[i * 4], grey[i * 4 + 1], grey[i * 4 + 2]) - Math.min(grey[i * 4], grey[i * 4 + 1], grey[i * 4 + 2]) <= 1, 'saturation -100 gives grey');
+});
+await test('adjustments apply to colour-mapped single bands too, and presets carry them', () => {
+  const values = Float32Array.from({ length: 11 }, (_, i) => i * 10);
+  const s = spec({ expressions: ['b1'], ranges: [[0, 100]], colormap: 'viridis', brightness: 30, saturation: -100 });
+  const rgba = lib.compositeToRGBA(s, [values], 11);
+  const table = lib.colormapTable('viridis');
+  for (let i = 0; i < 11; i++) {
+    const m = Math.round((i / 10) * 255) * 3;
+    const expected = qgisPipeline([table[m], table[m + 1], table[m + 2]], { brightness: 30, contrast: 0, gamma: 1, saturation: -100 });
+    for (let c = 0; c < 3; c++) assert.ok(Math.abs(rgba[i * 4 + c] - expected[c]) <= 1.5);
+  }
+  const fromPreset = lib.compositeSpec({ name: 'p', value: 'b1', brightness: 300, contrast: -20, saturation: 10, gamma: 0 }, 1, [null]);
+  assert.deepEqual([fromPreset.brightness, fromPreset.contrast, fromPreset.saturation, fromPreset.gamma], [255, -20, 10, 0.1], 'limited to QGIS ranges');
+  const plain = lib.compositeSpec({ name: 'p', value: 'b1' }, 1, [null]);
+  assert.deepEqual([plain.brightness, plain.contrast, plain.saturation, plain.gamma], [0, 0, 0, 1]);
+});
+
+console.log('Paletted / unique values');
+await test("colour map files in QGIS's format: read and written", () => {
+  const text = [
+    '# QGIS Generated Color Map Export File',
+    'INTERPOLATION:EXACT',
+    '0 0 0 0 0 No data',
+    '4,0,160,0,255,Vegetation',
+    '6 0 0 255 128 Water: deep',
+    '8:255:255:255',
+    '9 #ff8800',
+    '10',
+    '2.5 10 20 30 255 decimal',
+    'not a class line',
+  ].join('\n');
+  const classes = lib.parseColorMap(text);
+  assert.deepEqual(classes.map((c) => c.value), [0, 4, 6, 8, 9, 10, 2.5]);
+  assert.deepEqual(classes[1], { value: 4, color: [0, 160, 0, 255], label: 'Vegetation' });
+  assert.deepEqual(classes[2], { value: 6, color: [0, 0, 255, 128], label: 'Water deep' }, 'separators inside labels are spaces, as in QGIS');
+  assert.deepEqual(classes[3].color, [255, 255, 255, 255]);
+  assert.deepEqual(classes[4].color, [255, 136, 0, 255]);
+  assert.deepEqual(classes[5].color, [200, 200, 200, 255]);
+  const out = lib.colorMapToString([{ value: 9, color: [1, 2, 3, 255], label: 'nine' }, { value: 2.5, color: [4, 5, 6, 128], label: '' }]);
+  assert.equal(out, '2.5 4 5 6 128\n9 1 2 3 255 nine', 'sorted by value, "value r g b alpha label"');
+  assert.deepEqual(lib.parseColorMap(out).map((c) => [c.value, ...c.color]), [[2.5, 4, 5, 6, 128], [9, 1, 2, 3, 255]]);
+});
+await test("QGIS's random colours: evenly spread hues, saturation and value in its ranges", () => {
+  let seed = 3;
+  const rand = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  const colors = lib.randomColors(12, rand);
+  assert.equal(colors.length, 12);
+  for (const [r, g, b, a] of colors) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    assert.equal(a, 255);
+    assert.ok(max >= 199 && max <= 241, `value ${max}`);
+    assert.ok(((max - min) / max) * 255 >= 99 && ((max - min) / max) * 255 <= 241, 'saturation');
+  }
+  assert.equal(new Set(colors.map((c) => c.join())).size, 12, 'distinct');
+  const viridis = lib.rampColors('viridis', 3);
+  const table = lib.colormapTable('viridis');
+  assert.deepEqual(viridis[0], [table[0], table[1], table[2], 255]);
+  assert.deepEqual(viridis[2], [table[765], table[766], table[767], 255], 'last class gets the end of the ramp');
+});
+await test('paletted rendering: listed values get their colour and opacity, others are transparent', () => {
+  const spec = lib.compositeSpec(
+    { name: 'scl', paletted: 'b1', classes: [{ value: 4, color: '#00a000' }, { value: 6, color: '#0000ff80', label: 'Water' }, { value: 0.1, color: '#ff0000' }] },
+    1,
+    [null],
+  );
+  assert.equal(lib.presetMode({ name: 'x', paletted: 'b1' }), 'paletted');
+  assert.deepEqual(spec.expressions, ['b1']);
+  assert.equal(spec.classes.length, 3);
+  const values = Float32Array.of(4, 6, 5, NaN, 0.1, 4);
+  const rgba = lib.compositeToRGBA(spec, [values], 6);
+  assert.deepEqual(Array.from(rgba.subarray(0, 4)), [0, 160, 0, 255]);
+  assert.deepEqual(Array.from(rgba.subarray(4, 8)), [0, 0, 255, 128], 'opacity from #rrggbbaa');
+  assert.equal(rgba[11], 0, 'a value with no class is transparent');
+  assert.equal(rgba[15], 0, 'NoData is transparent');
+  assert.deepEqual(Array.from(rgba.subarray(16, 20)), [255, 0, 0, 255], '0.1 matches the float32 value 0.1');
+  const darker = lib.compositeToRGBA({ ...spec, brightness: -100 }, [values], 6);
+  assert.deepEqual(Array.from(darker.subarray(0, 4)), [0, 60, 0, 255], 'adjustments apply to class colours');
+  const grey = lib.compositeToRGBA({ ...spec, saturation: -100 }, [values], 6);
+  assert.equal(grey[0], grey[1]);
+});
+await test('paletted presets: classes parsed, invalid ones dropped, colours checked', () => {
+  const classes = lib.presetClasses({ name: 'p', paletted: 'b1', classes: [{ value: 1, color: 'nope' }, { value: 'x', color: '#fff' }, { value: 2, color: '#abc', label: 'two' }] });
+  assert.deepEqual(classes, [{ value: 1, rgba: [200, 200, 200, 255], label: '' }, { value: 2, rgba: [170, 187, 204, 255], label: 'two' }]);
+  assert.deepEqual(lib.parseHexColor('#11223344'), [17, 34, 51, 68]);
+  assert.equal(lib.toHexColor([17, 34, 51, 255]), '#112233');
+  assert.equal(lib.toHexColor([17, 34, 51, 68]), '#11223344');
+  assert.deepEqual(lib.sanitizePresets([{ name: 'p', paletted: 'SCL' }]).length, 1);
+  const many = lib.presetClasses({ name: 'p', paletted: 'b1', classes: Array.from({ length: 300 }, (_, i) => ({ value: i, color: '#000000' })) });
+  assert.equal(lib.MAX_CLASSES, 256);
+  assert.equal(many.length, 256, 'at most 256 classes');
 });
 
 // End to end on a generated 5-band uint16 GeoTIFF with band descriptions (Deflate, two strips).
@@ -294,9 +520,23 @@ await test('reads only the bands a composite uses, with band names from the file
   assert.deepEqual(compiled.samples, [2, 1, 0]);
   const region = await tiffLib.readRegion(page, page.images[0], [0, 0, width, height], width, height, { samples: compiled.samples });
   const channels = compiled.evaluate(region.data, width * height, page.info.noData);
-  const rgba = lib.compositeToRGBA(spec, channels, width * height, 'minmax');
+  const rgba = lib.compositeToRGBA(spec, channels, width * height);
   assert.equal(rgba[3], 0, 'no-data pixel is transparent');
   assert.deepEqual(Array.from(rgba.subarray(4 * 9, 4 * 9 + 4)), [Math.round(3009 * 0.0255), Math.round(2009 * 0.0255), Math.round(1009 * 0.0255), 255]);
+});
+
+await test('class values are sampled, not averaged, when zoomed out', async () => {
+  const width = 8, height = 6, bands = 5;
+  const pixels = new Uint16Array(width * height * bands);
+  // Band 1 alternates classes 4 and 9 column by column; averaging would give 6.5.
+  for (let i = 0; i < width * height; i++) for (let b = 0; b < bands; b++) pixels[i * bands + b] = (i % width) % 2 ? 9 : 4;
+  const file = buildTiff({ width, height, bands, pixels, xml: '<GDALMetadata></GDALMetadata>\0', noData: '0\0' });
+  const source = new lib.MessageSource(file.byteLength, async (ranges) => ranges.map(({ offset, length }) => file.slice(offset, offset + length).buffer));
+  const page = (await lib.openTiff(source)).pages[0];
+  const averaged = await lib.readRegion(page, page.images[0], [0, 0, width, height], 4, 3, { samples: [0] });
+  const nearest = await lib.readRegion(page, page.images[0], [0, 0, width, height], 4, 3, { samples: [0], nearest: true });
+  assert.ok(Array.from(averaged.data[0]).some((v) => v === 6.5), 'averaging mixes classes');
+  assert.ok(Array.from(nearest.data[0]).every((v) => v === 4 || v === 9), 'nearest keeps class values');
 });
 
 /** A minimal little-endian TIFF: uint16, pixel-interleaved, Deflate, two strips, GDAL metadata and nodata tags. */
