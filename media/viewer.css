@@ -521,3 +521,155 @@ button:disabled:hover {
 .channels.paletted {
   grid-template-columns: max-content 1fr;
 }
+
+/* Overlays panel */
+#overlays {
+  width: 340px;
+  max-width: 50%;
+  overflow: auto;
+  padding: 4px 12px 12px;
+  border-left: 1px solid var(--vscode-panel-border, transparent);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  user-select: text;
+}
+
+#overlays[hidden] {
+  display: none;
+}
+
+#overlays h3 {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+
+#overlays .field {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#overlays .field[hidden],
+#overlays [hidden] {
+  display: none;
+}
+
+#overlays .field.slider-field {
+  grid-template-columns: 90px 1fr 56px;
+}
+
+#overlays .field select,
+#overlays .field input[type='text'] {
+  min-width: 0;
+  width: 100%;
+}
+
+#overlays input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--vscode-button-background);
+}
+
+#overlays .hint {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+#overlays .check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+#overlays .buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#overlays .error {
+  margin: 6px 0;
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+  overflow-wrap: anywhere;
+}
+
+#overlays .error[hidden] {
+  display: none;
+}
+
+.vector-add {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px;
+}
+
+.vector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.vector-layer {
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+  border-radius: 3px;
+}
+
+.vector-top {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.vector-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vector-warning {
+  margin-top: 4px;
+  padding: 2px 6px;
+  border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
+  background: var(--vscode-inputValidation-warningBackground, transparent);
+  overflow-wrap: anywhere;
+}
+
+.vector-style {
+  display: grid;
+  grid-template-columns: 36px 56px 1fr;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.vector-style input[type='color'] {
+  width: 32px;
+  height: 22px;
+  padding: 0 2px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  background: var(--vscode-input-background);
+}
+
+#ticksToggle[aria-pressed='true'] {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+#overlaysToggle:disabled {
+  opacity: 0.5;
+}

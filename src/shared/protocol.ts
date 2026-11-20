@@ -20,6 +20,25 @@ export type PixelWindow = [number, number, number, number];
 
 export type ToneMode = 'minmax' | 'percentile' | 'full';
 
+/** How a georeferenced image maps onto the Earth. */
+export interface GeoInfo {
+  /** GDAL geotransform: x = t0 + t1·col + t2·row, y = t3 + t4·col + t5·row (pixel corners, CRS units). */
+  transform: [number, number, number, number, number, number];
+  /** The coordinate system as a proj4 definition. */
+  proj4: string;
+  /** Multipliers taking CRS coordinates to the units proj4 expects (e.g. feet → metres). */
+  factors: { x: number; y: number };
+  /** e.g. "EPSG:32618 (WGS 84 / UTM zone 18N)". */
+  crsName: string;
+  geographic: boolean;
+}
+
+/** A file read for an overlay: its name and bytes (a shapefile comes with its .dbf, .prj, .cpg). */
+export interface OverlayFile {
+  name: string;
+  data: Uint8Array;
+}
+
 // ---------------------------------------------------------------------------
 // Extension host <-> webview
 // ---------------------------------------------------------------------------
@@ -39,6 +58,14 @@ export type HostToWebview =
     }
   | { type: 'presets'; presets: Preset[]; select?: string }
   | { type: 'colorMapLoaded'; text: string; fileName: string }
+  /** Answer to 'fetch': the body as bytes or text, or why it failed. */
+  | { type: 'fetched'; id: number; ok: boolean; status: number; bytes?: Uint8Array; text?: string; contentType?: string; error?: string }
+  /** Answer to 'readOverlay'. */
+  | { type: 'overlayRead'; id: number; ok: boolean; path: string; name: string; files?: OverlayFile[]; error?: string }
+  /** Answer to 'browseOverlay': the chosen paths (relative to the workspace folder when inside it). */
+  | { type: 'overlayBrowsed'; paths: string[] }
+  /** Answer to 'chooseLayers': the indexes picked, or none when cancelled. */
+  | { type: 'layersChosen'; id: number; indexes: number[] }
   | { type: 'readResult'; id: number; data: Uint8Array[] }
   | { type: 'readError'; id: number; message: string }
   | { type: 'reload'; fileSize: number };
@@ -54,7 +81,15 @@ export type WebviewToHost =
   /** Asks for a colour map file (QGIS format) to load; answered with 'colorMapLoaded'. */
   | { type: 'loadColorMap' }
   /** Asks where to save a colour map file, and writes `text` there. */
-  | { type: 'exportColorMap'; text: string; fileName: string };
+  | { type: 'exportColorMap'; text: string; fileName: string }
+  /** Fetches an http(s) URL through the extension host (map tiles, styles, capabilities). */
+  | { type: 'fetch'; id: number; url: string; as: 'bytes' | 'text' }
+  /** Reads a vector file for an overlay; `path` is absolute or relative to the workspace folder. */
+  | { type: 'readOverlay'; id: number; path: string }
+  /** Asks the user to pick vector files. */
+  | { type: 'browseOverlay' }
+  /** Asks which layers of a multi-layer vector file to load; answered with 'layersChosen'. */
+  | { type: 'chooseLayers'; id: number; file: string; layers: { name: string; count: number }[] };
 
 // ---------------------------------------------------------------------------
 // Webview <-> worker
@@ -104,6 +139,8 @@ export interface PageInfo {
   geoKeys: [string, string][];
   /** The image's colour table (TIFF ColorMap: all reds, then greens, then blues, 16-bit), for palette images. */
   palette?: number[];
+  /** Georeferencing, when the image has it (needed for overlays). */
+  geo?: GeoInfo;
   /** Decoding problem detected up front (e.g. unsupported compression). */
   unsupported?: string;
 }

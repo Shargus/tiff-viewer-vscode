@@ -54,6 +54,16 @@ masks[1, :, 64:128] = 0
 masks[:, :, :32] = 0
 tifffile.imwrite(path('two_band_nodata_masks.tif'), masks, planarconfig='separate', tile=(128, 128), extratags=[(42113, 's', 0, '0', True)])
 
+# GeoTIFFs in UTM zone 18N (EPSG:32618), 10 m pixels: PixelIsArea and PixelIsPoint.
+geo = np.arange(100 * 80, dtype=np.uint16).reshape(100, 80)
+keys = lambda raster_type: (1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, raster_type, 3072, 0, 1, 32618)
+for name, raster_type in (('geotiff_utm_area.tif', 1), ('geotiff_utm_point.tif', 2)):
+    tifffile.imwrite(path(name), geo, extratags=[
+        (33550, 'd', 3, (10.0, 10.0, 0.0), True),
+        (33922, 'd', 6, (0.0, 0.0, 0.0, 580920.0, 400570.0, 0.0), True),
+        (34735, 'H', 16, keys(raster_type), True),
+    ])
+
 # Custom (private) tags of several types, and GDAL metadata items, for the info panel.
 tags = np.arange(64 * 64, dtype=np.uint16).reshape(64, 64)
 tifffile.imwrite(path('custom_tags.tif'), tags, tile=(32, 32), software='my-pipeline 1.2', extratags=[

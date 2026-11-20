@@ -3,3 +3,5 @@ dist/
 *.vsix
 test/fixtures/
 .DS_Store
+.history
+landslide

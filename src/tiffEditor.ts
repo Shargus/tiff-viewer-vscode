@@ -1,4 +1,6 @@
 import * as fs from 'fs';
+import * as os from 'os';
+import * as pathModule from 'path';
 import * as vscode from 'vscode';
 import { PRESETS_FILE, type PresetStore } from './presetStore';
 import type { Preset } from './shared/presets';
@@ -67,7 +69,7 @@ class TiffDocument implements vscode.CustomDocument {
     const start = Math.max(0, Math.min(range.offset, this.size));
     const length = Math.max(0, Math.min(range.length, this.size - start, MAX_READ_BYTES));
     if (this.bytes) {
-      return this.bytes.slice(start, start + length);
+      return plainBytes(this.bytes.subarray(start, start + length));
     }
     const out = new Uint8Array(length);
     let done = 0;
@@ -171,6 +173,42 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
           case 'openPresetsFile':
             void this.presets.open();
             break;
+          case 'fetch':
+            void proxyFetch(message.url, message.as).then((result) => post({ type: 'fetched', id: message.id, ...result }));
+            break;
+          case 'readOverlay':
+            void readOverlay(overlayBase(document.uri), message.path).then((result) => post({ type: 'overlayRead', id: message.id, path: message.path, ...result }));
+            break;
+          case 'browseOverlay': {
+            const folder = overlayBase(document.uri);
+            const uris = await vscode.window.showOpenDialog({
+              title: 'Add vector layers',
+              canSelectMany: true,
+              defaultUri: vscode.Uri.joinPath(document.uri, '..'),
+              filters: { 'Vector files': VECTOR_EXTENSIONS, 'All files': ['*'] },
+            });
+            if (uris?.length) {
+              const base = folder.path.endsWith('/') ? folder.path : `${folder.path}/`;
+              void post({ type: 'overlayBrowsed', paths: uris.map((u) => (u.scheme === folder.scheme && u.path.startsWith(base) ? u.path.slice(base.length) : u.fsPath)) });
+            }
+            break;
+          }
+          case 'chooseLayers': {
+            const items = message.layers.map((l, index) => ({
+              label: l.name,
+              description: `${l.count} feature${l.count === 1 ? '' : 's'}`,
+              picked: true,
+              index,
+            }));
+            const picked = await vscode.window.showQuickPick(items, {
+              title: `Layers in ${message.file}`,
+              placeHolder: 'Choose the layers to load',
+              canPickMany: true,
+              matchOnDescription: true,
+            });
+            void post({ type: 'layersChosen', id: message.id, indexes: picked?.map((p) => p.index) ?? [] });
+            break;
+          }
           case 'loadColorMap': {
             const [uri] =
               (await vscode.window.showOpenDialog({
@@ -263,6 +301,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <select id="preset"></select>
     </label>
     <button id="compositeToggle" hidden title="Band rendering: RGB, single band or paletted (B)" aria-pressed="false">Rendering</button>
+    <button id="overlaysToggle" disabled title="Overlays need a georeferenced image (GeoTIFF)" aria-pressed="false">Overlays</button>
     <span class="spacer"></span>
     <button id="infoToggle" title="Image information (I)" aria-pressed="false">Info</button>
   </div>
@@ -336,6 +375,46 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       Example: <code>(B08 - B04) / (B08 + B04)</code>.</p>
       <p class="hint"><a href="#" id="openSettings">Open the presets file</a> (<code>~/.tiff-viewer-vscode/presets.jsonc</code>)</p>
     </aside>
+    <aside id="overlays" class="panel side-panel" hidden>
+      <h3>Overlays</h3>
+      <p class="hint" id="overlayCrs"></p>
+      <div class="buttons">
+        <button id="ticksToggle" aria-pressed="false" title="Coordinate ticks along the image's lower and left borders, a grid at the ticks, and a scale bar">Show coordinates &amp; scale</button>
+      </div>
+      <div class="field slider-field">
+        <span>Image opacity</span><input type="range" id="imageOpacity" min="0" max="100" step="1" value="100" aria-label="Image opacity"><input type="number" id="imageOpacityValue" min="0" max="100" step="1" value="100" aria-label="Image opacity (%)">
+      </div>
+      <h3>Basemap</h3>
+      <div class="field">
+        <span>Provider</span><select id="basemapProvider"></select>
+      </div>
+      <div class="field" id="basemapItemRow" hidden>
+        <span>Map</span><select id="basemapItem"></select>
+      </div>
+      <div class="field" id="basemapFilterRow" hidden>
+        <span>Filter</span><input type="text" id="basemapFilter" placeholder="filter layers" spellcheck="false">
+      </div>
+      <div class="field" id="basemapTimeRow" hidden>
+        <span>Date</span><input type="text" id="basemapTime" placeholder="default" spellcheck="false" title="Date of time-enabled layers (YYYY-MM-DD), or 'default'">
+      </div>
+      <div id="basemapOptions" hidden>
+        <div class="field slider-field">
+          <span>Opacity</span><input type="range" id="basemapOpacity" min="0" max="100" step="1" value="100" aria-label="Basemap opacity"><input type="number" id="basemapOpacityValue" min="0" max="100" step="1" value="100" aria-label="Basemap opacity (%)">
+        </div>
+        <label class="check"><input type="checkbox" id="basemapAbove"> Above the image</label>
+        <p class="hint" id="basemapAttribution"></p>
+      </div>
+      <p class="hint" id="basemapStatus"></p>
+      <h3>Vector layers</h3>
+      <div class="vector-add">
+        <input type="text" id="vectorPath" placeholder="path to vector file" title="Path to a vector file: absolute, or relative to the workspace folder" spellcheck="false" aria-label="Vector file path">
+        <button id="vectorAdd">Add</button>
+        <button id="vectorBrowse" title="Choose files">Browse…</button>
+      </div>
+      <p class="hint">GeoJSON, KML, KMZ, Shapefile, GeoPackage, or a zip of them.</p>
+      <div id="vectorError" class="error" role="alert" hidden></div>
+      <div id="vectorList" class="vector-list"></div>
+    </aside>
     <aside id="info" class="panel" hidden></aside>
   </div>
   <div id="status">
@@ -346,7 +425,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
     <span id="statusProgress"></span>
     <span id="statusFileSize" title="File size"></span>
   </div>
-  <script nonce="${nonce}">window.TIFF_WORKER_URL = ${JSON.stringify(asset('dist', 'webview', 'worker.js').toString())};</script>
+  <script nonce="${nonce}">window.TIFF_WORKER_URL = ${JSON.stringify(asset('dist', 'webview', 'worker.js').toString())}; window.TIFF_MAPLIBRE_URL = ${JSON.stringify(asset('dist', 'webview', 'maplibre-gl.js').toString())}; window.TIFF_SQLJS_WASM_URL = ${JSON.stringify(asset('dist', 'webview', 'sql-wasm.wasm').toString())}; window.TIFF_NONCE = ${JSON.stringify(nonce)};</script>
   <script nonce="${nonce}" src="${asset('dist', 'webview', 'main.js')}"></script>
 </body>
 </html>`;
@@ -410,6 +489,102 @@ async function deletePreset(store: PresetStore, name: string): Promise<void> {
 /** A file name pattern from a name: numbers and dates become wildcards (S2A_20190926_T18NWL.tif → S2A_*_T*NWL.tif). */
 function suggestPattern(fileName: string): string {
   return fileName.replace(/\d{2,}/g, '*').replace(/\*([^A-Za-z]*\*)+/g, '*');
+}
+
+// ---------------------------------------------------------------------------
+// Overlays: network access and vector files, for the webview
+// ---------------------------------------------------------------------------
+
+/** Identifies the extension to tile servers (OpenStreetMap's tile policy asks for this). */
+const USER_AGENT = 'tiff-viewer-vscode (+https://github.com/Shargus/tiff-viewer-vscode)';
+const MAX_PARALLEL_FETCHES = 12;
+let activeFetches = 0;
+const fetchQueue: (() => void)[] = [];
+
+/**
+ * Fetches a URL for the webview, which has no network access of its own
+ * (its content security policy keeps it closed). http(s) only.
+ */
+async function proxyFetch(
+  url: string,
+  as: 'bytes' | 'text',
+): Promise<{ ok: boolean; status: number; bytes?: Uint8Array; text?: string; contentType?: string; error?: string }> {
+  if (!/^https?:\/\//i.test(url)) return { ok: false, status: 0, error: 'Only http(s) URLs can be fetched' };
+  if (activeFetches >= MAX_PARALLEL_FETCHES) await new Promise<void>((resolve) => fetchQueue.push(resolve));
+  activeFetches++;
+  try {
+    const response = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(30_000), redirect: 'follow' });
+    const contentType = response.headers.get('content-type') ?? undefined;
+    if (!response.ok) return { ok: false, status: response.status, contentType, error: `HTTP ${response.status}` };
+    if (as === 'text') return { ok: true, status: response.status, contentType, text: await response.text() };
+    return { ok: true, status: response.status, contentType, bytes: new Uint8Array(await response.arrayBuffer()) };
+  } catch (error) {
+    return { ok: false, status: 0, error: (error as Error).message ?? String(error) };
+  } finally {
+    activeFetches--;
+    fetchQueue.shift()?.();
+  }
+}
+
+const VECTOR_EXTENSIONS = ['geojson', 'json', 'kml', 'kmz', 'shp', 'gpkg', 'zip'];
+
+/**
+ * The folder relative overlay paths start from: the workspace folder holding
+ * the image, else the first workspace folder, else the image's folder.
+ */
+function overlayBase(image: vscode.Uri): vscode.Uri {
+  return vscode.workspace.getWorkspaceFolder(image)?.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.joinPath(image, '..');
+}
+
+/**
+ * Reads a vector file for an overlay. `path` is absolute (or starts with ~)
+ * or relative to `base` (see overlayBase). A shapefile comes with its .dbf, .prj
+ * and .cpg; a File Geodatabase is refused.
+ */
+async function readOverlay(
+  base: vscode.Uri,
+  path: string,
+): Promise<{ ok: boolean; name: string; files?: { name: string; data: Uint8Array }[]; error?: string }> {
+  const trimmed = path.trim().replace(/^"(.*)"$/, '$1');
+  const home = os.homedir();
+  const expanded = trimmed === '~' ? home : trimmed.startsWith('~/') ? pathModule.join(home, trimmed.slice(2)) : trimmed;
+  const uri = pathModule.isAbsolute(expanded) ? base.with({ path: vscode.Uri.file(expanded).path }) : vscode.Uri.joinPath(base, expanded);
+  const name = uri.path.slice(uri.path.replace(/\/+$/, '').lastIndexOf('/') + 1).replace(/\/+$/, '');
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.type & vscode.FileType.Directory) {
+      return /\.gdb$/i.test(name)
+        ? { ok: false, name, error: 'File Geodatabase (.gdb) is not supported. Export the layers to GeoPackage or GeoJSON (e.g. with QGIS or ogr2ogr).' }
+        : { ok: false, name, error: `${name} is a folder, not a vector file.` };
+    }
+    const files = [{ name, data: plainBytes(await vscode.workspace.fs.readFile(uri)) }];
+    if (/\.shp$/i.test(name)) {
+      // The attributes, projection and encoding live next to it.
+      const stem = name.slice(0, -4);
+      for (const ext of ['dbf', 'prj', 'cpg']) {
+        for (const candidate of [`${stem}.${ext}`, `${stem}.${ext.toUpperCase()}`]) {
+          try {
+            files.push({ name: candidate, data: plainBytes(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(uri, '..', candidate))) });
+            break;
+          } catch {
+            // Not there; .prj and .cpg are optional, and a missing .dbf only loses attributes.
+          }
+        }
+      }
+    }
+    return { ok: true, name, files };
+  } catch (error) {
+    return { ok: false, name, error: error instanceof vscode.FileSystemError && error.code === 'FileNotFound' ? `${uri.fsPath} does not exist.` : `Could not read ${uri.fsPath}: ${(error as Error).message ?? error}` };
+  }
+}
+
+/**
+ * A copy as a plain Uint8Array. vscode.workspace.fs returns Node Buffers, and a
+ * Buffer posted to a webview arrives as {type: 'Buffer', data: [...]} (its
+ * toJSON runs before VS Code's message serialisation sees the bytes).
+ */
+function plainBytes(bytes: Uint8Array): Uint8Array {
+  return Object.getPrototypeOf(bytes) === Uint8Array.prototype ? bytes : new Uint8Array(bytes);
 }
 
 function createNonce(): string {

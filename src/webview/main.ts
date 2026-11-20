@@ -29,6 +29,8 @@ import {
   type Preset,
   type RangeSetting,
 } from '../shared/presets';
+import { toBytes } from './bytes';
+import { Overlays } from './overlays';
 import type {
   FileInfo,
   HostToWebview,
@@ -46,6 +48,9 @@ declare function acquireVsCodeApi(): { postMessage(message: WebviewToHost): void
 declare global {
   interface Window {
     TIFF_WORKER_URL: string;
+    TIFF_MAPLIBRE_URL: string;
+    TIFF_SQLJS_WASM_URL: string;
+    TIFF_NONCE: string;
   }
 }
 
@@ -374,6 +379,7 @@ function selectPage(index: number, keepView = false): void {
 
   statusSize.textContent = `${page.width} × ${page.height}`;
   renderInfo();
+  overlays.setPage(page);
 
   if (!sameSize) {
     fitMode = 'auto';
@@ -626,6 +632,9 @@ function checkerPattern(): CanvasPattern {
   return checker;
 }
 
+/** The image on its own layer, when overlays go under it or it is see-through. */
+let imageLayer: HTMLCanvasElement | undefined;
+
 function draw(): void {
   const dpr = devicePixelRatio;
   const width = Math.round(stage.clientWidth * dpr);
@@ -637,13 +646,15 @@ function draw(): void {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
   const page = currentPage();
-  if (!page || tiles.size === 0) {
+  if (!page) {
     return;
   }
   const visible = visibleWindow(page);
   if (!visible) {
     return;
   }
+  const viewState = { scale: view.scale, tx: view.tx, ty: view.ty, dpr, width: stage.clientWidth, height: stage.clientHeight };
+  const layered = overlays.layered;
   // Coarse levels first, finer ones on top. Finer tiles than the view needs
   // (left from zooming in) are drawn too, down to two levels below.
   const shown = [...tiles.values()]
@@ -660,15 +671,35 @@ function draw(): void {
     // by level alone let sharp tiles left from zooming in, rendered with older
     // settings, cover current ones for good.)
     .sort((a, b) => (a.generation === generation ? 1 : 0) - (b.generation === generation ? 1 : 0) || b.z - a.z || a.generation - b.generation);
-  if (hasTransparency(page)) {
+  if (hasTransparency(page) || layered) {
     const [x0, y0, x1, y1] = deviceRect(page, [0, 0, page.width, page.height]);
     ctx.fillStyle = checkerPattern();
     ctx.fillRect(Math.max(0, x0), Math.max(0, y0), Math.min(width, x1) - Math.max(0, x0), Math.min(height, y1) - Math.max(0, y0));
   }
+  overlays.drawBasemap(ctx, viewState, 'below');
+  // The image: straight onto the canvas, or onto its own layer to go over the basemap / be see-through.
+  let target = ctx;
+  if (layered) {
+    imageLayer ??= document.createElement('canvas');
+    if (imageLayer.width !== width || imageLayer.height !== height) {
+      imageLayer.width = width;
+      imageLayer.height = height;
+    }
+    target = imageLayer.getContext('2d')!;
+    target.setTransform(1, 0, 0, 1, 0, 0);
+    target.clearRect(0, 0, width, height);
+  }
   for (const tile of shown) {
     tile.used = ++drawCounter;
-    drawTile(page, tile, width, height);
+    drawTile(target, page, tile, width, height, !layered);
   }
+  if (layered && imageLayer) {
+    ctx.globalAlpha = overlays.imageOpacity;
+    ctx.drawImage(imageLayer, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+  overlays.drawBasemap(ctx, viewState, 'above');
+  overlays.drawTop(ctx, viewState);
 }
 
 function hasTransparency(page: PageInfo): boolean {
@@ -689,7 +720,7 @@ function deviceRect(page: PageInfo, window: PixelWindow): [number, number, numbe
   ];
 }
 
-function drawTile(page: PageInfo, tile: DisplayTile, width: number, height: number): void {
+function drawTile(ctx: CanvasRenderingContext2D, page: PageInfo, tile: DisplayTile, width: number, height: number, checker: boolean): void {
   const [x0, y0, x1, y1] = deviceRect(page, tile.window);
   // Clip to the canvas to keep coordinates small at high zoom.
   const cx0 = Math.max(0, x0);
@@ -708,8 +739,10 @@ function drawTile(page: PageInfo, tile: DisplayTile, width: number, height: numb
   if (hasTransparency(page) && tile.final) {
     // Do not let coarser tiles show through transparent pixels.
     ctx.clearRect(cx0, cy0, cx1 - cx0, cy1 - cy0);
-    ctx.fillStyle = checkerPattern();
-    ctx.fillRect(cx0, cy0, cx1 - cx0, cy1 - cy0);
+    if (checker) {
+      ctx.fillStyle = checkerPattern();
+      ctx.fillRect(cx0, cy0, cx1 - cx0, cy1 - cy0);
+    }
   }
   // Show crisp pixels when magnifying full-resolution data; smooth otherwise.
   ctx.imageSmoothingEnabled = !(tile.z === 0 && view.scale * devicePixelRatio >= 1);
@@ -1940,11 +1973,35 @@ $('openSettings').addEventListener('click', (event) => {
 });
 
 // ---------------------------------------------------------------------------
+// Overlays
+// ---------------------------------------------------------------------------
+
+const overlays = new Overlays({
+  post: (message) => vscode.postMessage(message),
+  redraw: () => draw(),
+  view: () => ({ scale: view.scale, tx: view.tx, ty: view.ty, dpr: devicePixelRatio, width: stage.clientWidth, height: stage.clientHeight }),
+  page: () => currentPage(),
+  showWindow: (window) => {
+    const page = currentPage();
+    if (!page) return;
+    const [x0, y0, x1, y1] = [Math.max(0, window[0]), Math.max(0, window[1]), Math.min(page.width, window[2]), Math.min(page.height, window[3])];
+    const w = Math.max(1, x1 - x0);
+    const h = Math.max(1, y1 - y0);
+    view.scale = Math.min(maxScale(), Math.max(minScale(), 0.9 * Math.min(stage.clientWidth / w, stage.clientHeight / h)));
+    view.tx = stage.clientWidth / 2 - ((x0 + x1) / 2) * view.scale;
+    view.ty = stage.clientHeight / 2 - ((y0 + y1) / 2) * view.scale;
+    fitMode = undefined;
+    layout();
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Extension host messages
 // ---------------------------------------------------------------------------
 
 window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
   const message = event.data;
+  if (overlays.onHostMessage(message)) return;
   switch (message.type) {
     case 'init':
       fileName = message.fileName;
@@ -1965,7 +2022,7 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
       void start(message.fileSize);
       break;
     case 'readResult': {
-      const buffers = message.data.map((chunk) =>
+      const buffers = message.data.map(toBytes).map((chunk) =>
         chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength
           ? (chunk.buffer as ArrayBuffer)
           : (chunk.slice().buffer as ArrayBuffer),

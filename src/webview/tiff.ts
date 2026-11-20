@@ -6,6 +6,7 @@ import type { FileInfo, LevelInfo, PageInfo, PixelWindow, ToneMode } from '../sh
 import { decodeCcitt } from './ccitt';
 import { JpegDecoder, usesNativeJpeg } from './jpeg';
 import { lzwDecode } from './lzw';
+import { readGeoInfo } from './georef';
 import { parseGdalMetadata, readAllTags, readGeoKeys } from './tags';
 import type { DecodePool } from './decodePool';
 import type { MessageSource } from './messageSource';
@@ -488,6 +489,7 @@ async function describePage(image: GeoTIFFImage, ifd: number): Promise<Page> {
     tags,
     allTags: (await readAllTags(image)).map((t): [string, string] => [t.label, t.value]),
     palette: kind === 'palette' && colorMap ? Array.from(colorMap as ArrayLike<number>) : undefined,
+    geo: await readGeoInfo(image),
     metadata: typeof gdalMetadata === 'string' ? parseGdalMetadata(gdalMetadata) : [],
     geoKeys: readGeoKeys(image),
   };

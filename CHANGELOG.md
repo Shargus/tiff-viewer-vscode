@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- **Overlays** for GeoTIFFs (the button is greyed out for other images), reprojected into the image's coordinate system and clipped to its extent:
+  - **Basemaps**: the Basemaps QGIS plugin's selection: raster tiles (Esri, Google, OpenStreetMap, Bing, CARTO, …), vector tiles (Esri, OpenFreeMap; drawn with MapLibre) and WMTS services (EOX Sentinel-2 cloudless, Esri Wayback, NASA GIBS with dates), above or below the image, with their own opacity.
+  - **Vector layers** from GeoJSON, KML, KMZ, Shapefile, GeoPackage and zips, by path (absolute or relative to the workspace folder) or Browse (choosing which layers to load when a file has several), each with colour, width, opacity, visibility and zoom-to, and a warning when none of its features fall within the image.
+  - **Show coordinates & scale**: x and y ticks along the image's lower and left borders, a thin grid at the ticks, and a scale bar, following the zoom.
+  - **Image opacity**. Double-click any opacity slider to set it back to 100%.
+- Third-party licences are in THIRD_PARTY_NOTICES.md.
+
 ## 0.3.0
 
 - **Paletted / unique values** rendering, as in QGIS: a colour, opacity and label per value (up to 256 classes), with Classify (unique values of the whole band), colour ramps (including QGIS's random colours), editing several classes at once, loading the image's own colour table, and loading/exporting QGIS colour map files (`.clr`). Class values are never averaged when zoomed out.

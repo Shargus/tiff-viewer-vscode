@@ -1,3 +1,4 @@
+import { copyFileSync, mkdirSync } from 'node:fs';
 import * as esbuild from 'esbuild';
 
 const production = process.argv.includes('--production');
@@ -44,6 +45,14 @@ const builds = [
     target: 'chrome114',
   },
 ];
+
+// Loaded by the webview only when needed: MapLibre (vector basemaps) and SQLite (GeoPackage).
+const assets = [
+  ['node_modules/maplibre-gl/dist/maplibre-gl.js', 'dist/webview/maplibre-gl.js'],
+  ['node_modules/sql.js/dist/sql-wasm-browser.wasm', 'dist/webview/sql-wasm.wasm'],
+];
+mkdirSync('dist/webview', { recursive: true });
+for (const [from, to] of assets) copyFileSync(from, to);
 
 if (watch) {
   for (const options of builds) {

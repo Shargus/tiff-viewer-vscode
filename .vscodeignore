@@ -2,6 +2,8 @@
 !dist/extension.js
 !dist/webview/main.js
 !dist/webview/worker.js
+!dist/webview/maplibre-gl.js
+!dist/webview/sql-wasm.wasm
 !media/**
 !schemas/**
 !images/icon.png
@@ -9,3 +11,4 @@
 !README.md
 !CHANGELOG.md
 !LICENSE
+!THIRD_PARTY_NOTICES.md

@@ -313,6 +313,23 @@ await test('zoomed out, each band averages only its own valid pixels', () =>
   }),
 );
 
+console.log('Georeferencing');
+for (const [name, shift] of [['geotiff_utm_area.tif', 0], ['geotiff_utm_point.tif', 5]]) {
+  await test(`${name}: transform and coordinate system`, () =>
+    withFixture(name, async (tiff) => {
+      const geo = tiff.pages[0].info.geo;
+      assert.ok(geo, 'georeferenced');
+      assert.match(geo.crsName, /^EPSG:32618/);
+      assert.match(geo.proj4, /\+proj=tmerc .*\+lon_0=-75 .*\+k_0=0\.9996 .*\+x_0=500000/);
+      // PixelIsPoint: the tiepoint is the centre of the first pixel, so the corner is half a pixel up-left (as GDAL).
+      assert.deepEqual(geo.transform, [580920 - shift, 10, 0, 400570 + shift, 0, -10]);
+    }),
+  );
+}
+await test('a plain TIFF is not georeferenced', () =>
+  withFixture('gray16_deflate.tif', async (tiff) => assert.equal(tiff.pages[0].info.geo, undefined)),
+);
+
 console.log('Info panel');
 await test('every tag is listed, custom ones by number, with GDAL metadata items', () =>
   withFixture('custom_tags.tif', async (tiff) => {

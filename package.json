@@ -106,20 +106,27 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . --noEmit && tsc -p src/webview --noEmit",
-    "test": "npm run build && node test/decode.test.mjs && node test/composite.test.mjs && node test/presetStore.test.mjs",
+    "test": "npm run build && node test/decode.test.mjs && node test/composite.test.mjs && node test/presetStore.test.mjs && node test/overlays.test.mjs",
     "vscode:prepublish": "npm run typecheck && node esbuild.mjs --production",
     "package": "vsce package",
     "publish:vsce": "vsce publish",
     "publish:ovsx": "ovsx publish"
   },
   "devDependencies": {
+    "@tmcw/togeojson": "^7.1.4",
     "@types/node": "^20.19.43",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.28.2",
     "geotiff": "^3.0.5",
+    "geotiff-geokeys-to-proj4": "^2026.11.15",
     "jsonc-parser": "^3.3.1",
+    "jszip": "^3.10.2",
+    "maplibre-gl": "^5.24.1",
     "ovsx": "^1.4.0",
+    "proj4": "^2.23.0",
+    "shpjs": "^6.2.0",
+    "sql.js": "^1.17.0",
     "typescript": "^5.9.3"
   }
 }

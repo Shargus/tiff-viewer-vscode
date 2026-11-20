@@ -19,6 +19,7 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 - **Colour models**: grayscale (WhiteIsZero / BlackIsZero), RGB, palette, CMYK, YCbCr, CIE L\*a\*b\*, with alpha (associated or unassociated).
 - **High bit depth and float data** are contrast-stretched: by default from the image's minimum to its maximum; in the **Rendering** panel, per channel, *min–max*, *2%–98%*, or the *full range* of the data type. NaN and GDAL NoData pixels are shown as transparent.
 - **Band composites** for multi-band imagery such as Sentinel-2 and Sentinel-1: RGB composites and band math with colour maps, saved as presets that can apply automatically (see below).
+- **Overlays** on GeoTIFFs: online basemaps (raster, vector tiles and WMTS) and vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips), reprojected into the image's coordinate system and clipped to its extent, each with its own opacity; coordinate ticks and a scale bar.
 - **Pixel readout**: the status bar shows the coordinates and the raw sample values under the cursor (and the composite's values).
 - **Info panel**: format, byte order, dimensions, bit depth, compression, tiling, pyramid levels, GDAL metadata items (as `gdalinfo` shows them), GeoTIFF keys, and every TIFF tag, including private and custom ones (by number). Long values expand on click.
 - Reloads automatically when the file changes on disk.
@@ -34,6 +35,7 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 | Next / previous page | Page selector | <kbd>PageDown</kbd> / <kbd>PageUp</kbd>, <kbd>]</kbd> / <kbd>[</kbd> |
 | Info panel | **Info** | <kbd>I</kbd> |
 | Rendering panel | **Rendering** | <kbd>B</kbd> |
+| Overlays panel (GeoTIFFs) | **Overlays** | |
 
 ## Band composites and presets
 
@@ -195,11 +197,26 @@ It is written for L2A products from **processing baseline 04.00 onwards**, whose
 
 **Images processed before baseline 04.00** (no offset, reflectance `DN / 10000`) need the offset removed from the preset: use `clamp(B04 / 10000 / 3, 0, 1)` in `ar`, and likewise `B03` in `ag` and `B02` in `ab`; otherwise they look too dark. Change or remove `match` to suit your files.
 
+## Overlays
+
+For a georeferenced image (a GeoTIFF with a coordinate system), **Overlays** in the toolbar opens a panel with a basemap, vector layers, and coordinates. The button is greyed out for other images. Everything is reprojected into the image's coordinate system and clipped to the image's extent: vector coordinates exactly as GDAL computes them, basemap tiles warped to within a tenth of an image pixel at worst (far less at normal zoom).
+
+- **Show coordinates & scale**: ticks of the image's x coordinate along its lower border and of y along its left border, a thin grid of lines at the ticks, and a scale bar in metres or kilometres (true ground distance). They follow the zoom: the spacing adapts, and when the image's borders are out of view the ticks run along the edges of the view.
+- **Image opacity**: to see what is under the image.
+- **Basemap**: the selection of the [Basemaps QGIS plugin](https://github.com/Fanchengyan/Basemaps): Esri, Google, OpenStreetMap, OpenTopoMap, OpenRailwayMap, Bing, CARTO, F4map and USGS raster tiles; Esri and OpenFreeMap vector tiles (drawn with MapLibre); and the EOX Sentinel-2 cloudless mosaics (by year), Esri World Imagery Wayback (by date) and NASA GIBS (layers and dates) tile services, whose layer lists are read from the services. The basemap has its own opacity and goes under the image, or above it. Its attribution is shown in the corner.
+- **Vector layers**: type a path, absolute or relative to the workspace folder, or **Browse…**. GeoJSON, KML, KMZ, Shapefile (with its .dbf, .prj, .cpg), GeoPackage (one layer per feature table), and zips of these are read, in any coordinate system they declare. When a file holds several layers (KML/KMZ folders, GeoPackage tables, files in a zip), you are asked which ones to load. Each layer has its own colour, line width, opacity, visibility, *zoom to layer* and remove. File Geodatabases (.gdb) are not supported: export them to GeoPackage.
+
+Double-click an opacity slider to set it back to 100%.
+
+The extension host downloads tiles and styles for the viewer (which has no network access of its own); nothing else leaves your machine. Basemap providers' terms of use apply to their tiles.
+
 ## Using another editor for TIFF files
 
 This viewer is registered as the default editor for TIFF files. To open a file with something else, right-click it and choose **Open With…**. To change the default, use the `workbench.editorAssociations` setting.
 
 ## Limitations
+
+- Overlays: File Geodatabases (.gdb) are not supported; NASA GIBS layers delivered as vector tiles are not listed; images whose coordinate system cannot be expressed for proj4 have no overlays.
 
 - Not supported: JPEG 2000 (e.g. some Aperio SVS), old-style JPEG (compression 6), LZMA, JPEG XL, and uncompressed chroma-subsampled YCbCr.
 - Pyramid levels stored in SubIFDs (as in some OME-TIFF files) are not used; those images are rendered from full resolution.
@@ -233,6 +250,7 @@ git push --follow-tags
 - `src/webview/main.ts`: the viewer UI: canvas, zoom/pan, the display tile pyramid, info panel.
 - `src/webview/worker.ts`: a Web Worker that parses and decodes the TIFF with [geotiff.js](https://github.com/geotiffjs/geotiff.js), using a block-cached byte-range source (`messageSource.ts`). A few helper workers (same script) decompress tiles in parallel (`decodePool.ts`).
 - `src/webview/lzw.ts`: fast TIFF LZW decoder (Deflate uses the platform's `DecompressionStream`).
+- `src/webview/overlays.ts`, `basemap.ts`, `tilegrid.ts`, `geo.ts`, `vectors.ts`, `georef.ts`: the Overlays panel; basemaps warped into the image's projection; XYZ and WMTS tile grids; projections (proj4); vector file reading; the GeoTIFF's georeferencing.
 - `src/presetStore.ts`: the presets file in `~/.tiff-viewer-vscode` (created, watched, and edited in place with `jsonc-parser`).
 - `src/shared/expression.ts`, `presets.ts`, `colormaps.ts`, `src/webview/composite.ts`: band math (parsed and evaluated over whole tiles, since the webview forbids `eval`), presets, and composite colouring.
 - `src/webview/tiff.ts`: page/pyramid discovery, chunked region reading with box-filter or nearest-neighbour downsampling, and colour conversion.
@@ -259,6 +277,8 @@ Added in TIFF Viewer VS Code:
 - faster opening: a new LZW decoder, native Deflate, parallel tile decoding, sampled contrast statistics and a band-aware tile cache.
 
 Both use [geotiff.js](https://github.com/geotiffjs/geotiff.js) to parse and decode TIFF files.
+
+The basemaps offered in the Overlays panel are the selection of Fan Chengyan's [Basemaps](https://github.com/Fanchengyan/Basemaps) QGIS plugin. Overlays use [proj4js](https://github.com/proj4js/proj4js), [geotiff-geokeys-to-proj4](https://github.com/matafokka/geotiff-geokeys-to-proj4), [MapLibre GL JS](https://maplibre.org/), [shapefile-js](https://github.com/calvinmetcalf/shapefile-js), [togeojson](https://github.com/placemark/togeojson), [JSZip](https://stuk.github.io/jszip/) and [sql.js](https://sql.js.org/). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licences.
 
 ## License
 
