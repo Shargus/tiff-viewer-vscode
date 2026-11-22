@@ -9,8 +9,12 @@
 # Trusted Publishing, with repository owner "Shargus", repository
 # "tiff-viewer-vscode", workflow "publish.yml" and no environment.
 #
-# Open VSX: an access token from https://open-vsx.org/user-settings/tokens,
-# stored as the repository secret OVSX_PAT. Without it that step is skipped.
+# Open VSX: Trusted Publishing too (no stored token). It needs a trusted
+# publisher on https://open-vsx.org/user-settings/trusted-publishers →
+# namespace "Shargus", extension "tiff-viewer-vscode", GitHub Actions, with
+# owner "Shargus", repository "tiff-viewer-vscode", workflow "publish.yml" and
+# no environment. Open VSX registers it only for an extension that already has
+# a version, so the very first version was published by hand with a token.
 
 name: Publish
 
@@ -107,6 +111,9 @@ jobs:
     name: Open VSX
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Trusted Publishing exchanges the GitHub OIDC token for a short-lived Open VSX token
     steps:
       - uses: actions/checkout@v7
 
@@ -124,11 +131,4 @@ jobs:
           name: vsix
 
       - name: Publish
-        env:
-          OVSX_PAT: ${{ secrets.OVSX_PAT }}
-        run: |
-          if [ -z "$OVSX_PAT" ]; then
-            echo "::notice::OVSX_PAT is not set; skipping Open VSX."
-            exit 0
-          fi
-          npx ovsx publish --skip-duplicate --packagePath "${{ needs.build.outputs.vsix }}"
+        run: npx ovsx publish --trusted-publishing --skip-duplicate --packagePath "${{ needs.build.outputs.vsix }}"
