@@ -46,7 +46,8 @@ const INITIAL_CONTENT = `// Band rendering presets for the TIFF Viewer VS Code e
 // Band names in expressions: b1 … bN, the file's band descriptions (e.g. B04, B8A, VV),
 // and the names in "bands".
 // Expressions: + - * / % ^, comparisons < <= > >= == != (1 or 0), and the functions
-// abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2.
+// abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2,
+// pi, and nodata: a missing value (shown transparent, as NoData); x == nodata tests for it.
 {
   "presets": [
     // {

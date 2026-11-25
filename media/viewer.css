@@ -71,11 +71,6 @@ button[aria-pressed='true'] {
 
 button:focus-visible,
 select:focus-visible,
-#stage:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder);
-  outline-offset: -1px;
-}
-
 select {
   height: 24px;
   padding: 0 4px;
@@ -107,6 +102,68 @@ select {
   cursor: grab;
   outline: none;
   touch-action: none;
+}
+
+/* Table of the pixel's values next to the pointer (Space) */
+#pixelTip {
+  position: absolute;
+  z-index: 5;
+  max-height: calc(100% - 8px);
+  overflow: hidden;
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #888));
+  border-radius: 4px;
+  background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background, #fff));
+  color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground, #222));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#pixelTip[hidden] {
+  display: none;
+}
+
+#pixelTip table {
+  border-collapse: collapse;
+}
+
+#pixelTip caption {
+  padding-bottom: 3px;
+  text-align: left;
+  color: var(--vscode-descriptionForeground);
+}
+
+#pixelTip th,
+#pixelTip td {
+  padding: 1px 6px;
+}
+
+#pixelTip thead th {
+  border-bottom: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #888));
+  text-align: left;
+  font-weight: 600;
+}
+
+#pixelTip tbody th {
+  text-align: left;
+  font-weight: normal;
+  color: var(--vscode-descriptionForeground);
+}
+
+#pixelTip td {
+  text-align: right;
+}
+
+#pixelTip tbody + tbody tr:first-child > * {
+  border-top: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #888));
+}
+
+/* The image area takes the keyboard focus by itself (for Space and the other keys): no focus ring. */
+#stage:focus,
+#stage:focus-visible {
+  outline: none;
 }
 
 #stage.dragging {
@@ -209,8 +266,20 @@ select {
   overflow: hidden;
 }
 
+#status > span {
+  flex-shrink: 0;
+}
+
 #status .spacer {
   flex: 1;
+}
+
+/* Many bands: the values give way (ending in …) so the coordinate system and file size stay visible. */
+#status > #statusValue {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Side panels (composite editor, info) */

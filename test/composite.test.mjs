@@ -83,6 +83,23 @@ await test('no data becomes NaN, and stays NaN through min/max/where', () => {
   assert.ok(Number.isNaN(out[0]));
   assert.equal(out[1], 6);
 });
+await test('nodata: a missing value, and x == nodata tests for it', () => {
+  // Band x has NoData -32768: the first pixel is missing.
+  const data = [Int16Array.of(-32768, 5, 7)];
+  const run = (source) => evalOne(source, { x: 0, s: 0 }, data, -32768);
+  assert.deepEqual(run('where(x > 6, nodata, x)').map(Number.isNaN), [true, false, true], 'where(…, nodata, …) makes pixels missing');
+  assert.deepEqual(run('x == nodata'), [1, 0, 0]);
+  assert.deepEqual(run('nodata == x'), [1, 0, 0]);
+  assert.deepEqual(run('x != nodata'), [0, 1, 1]);
+  assert.deepEqual(run('where(x == nodata, 0, x)'), [0, 5, 7], 'fills missing pixels');
+  assert.deepEqual(run('(x + 1) == nodata'), [1, 0, 0], 'also for computed values');
+  assert.deepEqual(run('nodata == nodata'), [1, 1, 1]);
+  assert.ok(run('nodata + 1').every(Number.isNaN));
+  // Without a NoData value in the file it still means missing.
+  assert.ok(evalOne('nodata', { x: 0 }, [Uint8Array.of(0, 1)]).every(Number.isNaN));
+  assert.throws(() => lib.compileExpressions(['x'], { x: 0 }, { nodata: 'x' }), /cannot be a variable name/);
+  assert.equal(lib.bandIdentifier('nodata'), undefined);
+});
 await test('constant expression and repeated band', () => {
   const compiled = lib.compileExpressions(['0.5', 'b1 * b1', 'b1'], { b1: 2 });
   assert.deepEqual(compiled.samples, [2]);

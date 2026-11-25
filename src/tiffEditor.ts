@@ -300,16 +300,17 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <span>Bands</span>
       <select id="preset"></select>
     </label>
-    <button id="compositeToggle" hidden title="Band rendering: RGB, single band or paletted (B)" aria-pressed="false">Rendering</button>
+    <button id="compositeToggle" hidden title="Band rendering: RGB, single band or paletted" aria-pressed="false">Rendering</button>
     <button id="overlaysToggle" disabled title="Overlays need a georeferenced image (GeoTIFF)" aria-pressed="false">Overlays</button>
     <span class="spacer"></span>
-    <button id="infoToggle" title="Image information (I)" aria-pressed="false">Info</button>
+    <button id="infoToggle" title="Image information" aria-pressed="false">Info</button>
   </div>
   <div id="main">
     <div id="stage" tabindex="0">
       <canvas id="canvas"></canvas>
       <div id="progress" hidden><div id="progressBar"></div></div>
       <div id="message" hidden></div>
+      <div id="pixelTip" role="tooltip" hidden></div>
     </div>
     <aside id="composite" class="panel" hidden>
       <h3>Band rendering</h3>
@@ -370,8 +371,9 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <p class="hint">Click a band to insert it into the expression being edited.</p>
       <div id="bandList" class="band-list"></div>
       <h3>Expressions</h3>
-      <p class="hint">Operators <code>+ - * / ^ %</code>, comparisons <code>&lt; &gt; ==</code> (1 or 0), and
-      <code>abs sqrt exp log log10 log2 min max clamp pow where isnan round floor ceil</code>.
+      <p class="hint">Operators <code>+ - * / ^ %</code>, comparisons <code>&lt; &lt;= &gt; &gt;= == !=</code> (1 or 0),
+      <code>abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2</code>,
+      <code>pi</code>, and <code>nodata</code> (a missing value: transparent; <code>x == nodata</code> tests for it).
       Example: <code>(B08 - B04) / (B08 + B04)</code>.</p>
       <p class="hint"><a href="#" id="openSettings">Open the presets file</a> (<code>~/.tiff-viewer-vscode/presets.jsonc</code>)</p>
     </aside>
@@ -379,7 +381,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <h3>Overlays</h3>
       <p class="hint" id="overlayCrs"></p>
       <div class="buttons">
-        <button id="ticksToggle" aria-pressed="false" title="Coordinate ticks along the image's lower and left borders, a grid at the ticks, and a scale bar">Show coordinates &amp; scale</button>
+        <button id="ticksToggle" aria-pressed="false" title="Coordinate ticks along the image's lower and left borders, a grid at the ticks, and a scale bar (G)">Show coordinates &amp; scale</button>
       </div>
       <div class="field slider-field">
         <span>Image opacity</span><input type="range" id="imageOpacity" min="0" max="100" step="1" value="100" aria-label="Image opacity"><input type="number" id="imageOpacityValue" min="0" max="100" step="1" value="100" aria-label="Image opacity (%)">
@@ -423,6 +425,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
     <span id="statusValue"></span>
     <span class="spacer"></span>
     <span id="statusProgress"></span>
+    <span id="statusCrs"></span>
     <span id="statusFileSize" title="File size"></span>
   </div>
   <script nonce="${nonce}">window.TIFF_WORKER_URL = ${JSON.stringify(asset('dist', 'webview', 'worker.js').toString())}; window.TIFF_MAPLIBRE_URL = ${JSON.stringify(asset('dist', 'webview', 'maplibre-gl.js').toString())}; window.TIFF_SQLJS_WASM_URL = ${JSON.stringify(asset('dist', 'webview', 'sql-wasm.wasm').toString())}; window.TIFF_NONCE = ${JSON.stringify(nonce)};</script>

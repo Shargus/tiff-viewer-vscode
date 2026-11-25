@@ -1,6 +1,6 @@
 # TIFF Viewer VS Code
 
-View **TIFF**, **BigTIFF** and **GeoTIFF** images directly in VS Code, including files far larger than memory, with band composites for multi-band imagery such as Sentinel-1 and Sentinel-2.
+View **TIFF**, **BigTIFF** and **GeoTIFF** images directly in VS Code, including files far larger than memory, with band composites for multi-band imagery (e.g. satellite imagery).
 
 This extension is built on [**TIFF/BigTIFF**](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), which provides the viewer at its core: the fast, on-demand rendering of huge TIFF and BigTIFF files. TIFF Viewer VS Code started as a fork of it and adds tools for working with GeoTIFFs. See [Credits](#credits).
 
@@ -18,9 +18,9 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 - **Pixel formats**: 1 to 64 bits per sample, unsigned and signed integers, 16/32/64-bit floating point, tiled or striped, chunky or planar.
 - **Colour models**: grayscale (WhiteIsZero / BlackIsZero), RGB, palette, CMYK, YCbCr, CIE L\*a\*b\*, with alpha (associated or unassociated).
 - **High bit depth and float data** are contrast-stretched: by default from the image's minimum to its maximum; in the **Rendering** panel, per channel, *min–max*, *2%–98%*, or the *full range* of the data type. NaN and GDAL NoData pixels are shown as transparent.
-- **Band composites** for multi-band imagery such as Sentinel-2 and Sentinel-1: RGB composites and band math with colour maps, saved as presets that can apply automatically (see below).
+- **Band composites** for multi-band imagery (such as satellite imagery): RGB composites and band math with colour maps, saved as presets that can apply automatically (see below).
 - **Overlays** on GeoTIFFs: online basemaps (raster, vector tiles and WMTS) and vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips), reprojected into the image's coordinate system and clipped to its extent, each with its own opacity; coordinate ticks and a scale bar.
-- **Pixel readout**: the status bar shows the coordinates and the raw sample values under the cursor (and the composite's values).
+- **Pixel readout**: the status bar shows the coordinates and the raw sample values under the cursor (and the composite's values); for a GeoTIFF also the longitude and latitude of the pixel's centre, and the coordinate system. Press <kbd>Space</kbd> to show them in a table next to the cursor instead, and again to go back to the status bar: each band by its name in the file (or b1…bN, if no names are available). The values follow the cursor as it moves.
 - **Info panel**: format, byte order, dimensions, bit depth, compression, tiling, pyramid levels, GDAL metadata items (as `gdalinfo` shows them), GeoTIFF keys, and every TIFF tag, including private and custom ones (by number). Long values expand on click.
 - Reloads automatically when the file changes on disk.
 
@@ -33,23 +33,23 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 | Fit to window | Double-click, **Fit** | <kbd>0</kbd> |
 | Actual size (100%) | **1:1** | <kbd>1</kbd> |
 | Next / previous page | Page selector | <kbd>PageDown</kbd> / <kbd>PageUp</kbd>, <kbd>]</kbd> / <kbd>[</kbd> |
-| Info panel | **Info** | <kbd>I</kbd> |
-| Rendering panel | **Rendering** | <kbd>B</kbd> |
+| Info panel | **Info** | |
+| Rendering panel | **Rendering** | |
 | Overlays panel (GeoTIFFs) | **Overlays** | |
+| Pixel values in a table next to the cursor (on / off) | | <kbd>Space</kbd> |
+| Coordinates & scale (GeoTIFFs, on / off) | **Overlays** → **Show coordinates & scale** | <kbd>G</kbd> |
 
 ## Band composites and presets
 
-Click **Rendering** in the toolbar (or press <kbd>B</kbd>) to show the data your way:
+Click **Rendering** in the toolbar to show the data your way:
 
 - **RGB**: one expression per channel, e.g. red `B04 / 3000`, green `B03 / 3000`, blue `B02 / 3000`.
 - **Single band**: one expression shown with a colour map, e.g. `(B08 - B04) / (B08 + B04)` with *RdYlGn*.
 - **Paletted**: a colour for each value of a band, for classifications and masks, e.g. the Sentinel-2 scene classification `SCL` (see below).
 
-Each channel's **min** and **max** are the values shown as black and as full brightness. Leave both empty (as in a new composite) to stretch automatically: **auto =** then lets you choose, per channel, between **Min / Max** (the image's lowest and highest values, the default), **2% / 98%** (ignoring the darkest and brightest 2%), and **Full range** (the whole range of the data type, e.g. 0 to 65535 for 16-bit data). Pixels where every channel is NoData are transparent, and the status bar shows the computed values next to the raw band values under the cursor.
+Each channel's **min** and **max** are the values shown respectively as black and white. Leave both empty (as in a new composite) to stretch automatically: **auto =** then lets you choose, per channel, between **Min / Max** (the image's lowest and highest values, the default), **2% / 98%** (ignoring the darkest and brightest 2%), and **Full range** (the whole range of the data type, e.g. 0 to 65535 for 16-bit data). Pixels where every channel is NoData are transparent, and the status bar shows the computed values next to the raw band values under the cursor.
 
-**Brightness**, **contrast**, **saturation** and **gamma** work as in QGIS's raster symbology: brightness from −255 to 255, contrast and saturation from −100 to 100 (0: unchanged; saturation −100: grey), gamma from 0.1 to 10 (1: unchanged; above 1 brightens dark tones). Each has a slider and a box to type a value; double-click a slider, or click **Reset adjustments**, to go back to the default. For a single band they apply to the colour map's colours.
-
-RGB and Single band each keep their own settings while the image is open, so you can switch between them freely. Choosing **Default** in the Bands menu (the file's own rendering: RGB and palette images in their colours, other images' first band in grey) leaves the panel as it is. Custom settings are forgotten when the image is closed: save them as a preset to keep them.
+**Brightness**, **contrast**, **saturation** and **gamma** work as in QGIS's raster symbology: brightness from −255 to 255, contrast and saturation from −100 to 100 (0: unchanged; saturation −100: grey), gamma from 0.1 to 10 (1: unchanged; above 1 brightens dark tones).
 
 ### Paletted / unique values
 
@@ -61,21 +61,6 @@ Like QGIS's *Paletted/Unique values* renderer: each value listed in the table ge
 - **…** offers **Load classes from layer** (the image's own colour table, for paletted TIFFs), **Load colour map from file…** and **Export colour map to file…** in QGIS's `.clr` format: one class per line, `value red green blue alpha label`.
 - The status bar shows the value under the cursor with its label.
 
-In a preset:
-
-```jsonc
-{
-  "name": "Sentinel-2 scene classification",
-  "paletted": "SCL",
-  "classes": [
-    { "value": 3, "color": "#643200", "label": "Cloud shadow" },
-    { "value": 4, "color": "#00a000", "label": "Vegetation" },
-    { "value": 6, "color": "#0000ff", "label": "Water" },
-    { "value": 9, "color": "#ffffffc0", "label": "Cloud (high probability)" }   // #rrggbbaa: 75% opacity
-  ]
-}
-```
-
 ### Band names and expressions
 
 Expressions can use:
@@ -84,7 +69,9 @@ Expressions can use:
 - The file's band descriptions (as written by GDAL, rasterio, Google Earth Engine, …), e.g. `B04`, `B8A`, `VV`. The panel lists them; click one to insert it.
 - Names defined in the preset's `bands` (for files without band descriptions) and `variables` (see below).
 
-They support `+ - * / % ^`, comparisons `< <= > >= == !=` (1 or 0), and `abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2`, plus `pi`. For example `where(SCL == 9, 0, B04 / 3000)` blanks cloudy pixels, and `10 * log10(VV)` converts power to dB.
+They support `+ - * / % ^`, comparisons `< <= > >= == !=` (1 or 0), and `abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2`, plus `pi` and `nodata`.
+
+`nodata` is a missing value, which is what the file's NoData pixels are inside expressions, whatever number the file uses for them; it works the same in files without a NoData value. Missing results are shown transparent (in RGB, where all three channels are missing) and read *NoData* in the status bar. So `where(SCL == 9, nodata, B04)` hides cloudy pixels instead of blacking them out, `x == nodata` is 1 where `x` is missing (like `isnan(x)`) and `x != nodata` the opposite, and `where(B04 == nodata, 0, B04)` fills missing pixels with 0.
 
 ### Creating presets
 
@@ -112,70 +99,19 @@ The viewer edits only the entry concerned and keeps your comments and formatting
 
 When a file opens, the viewer shows what you last chose for that file, otherwise the first preset whose `match` fits, otherwise the image's own colours.
 
-Some examples:
+### Useful presets
+
+Here we provide some example presets for Sentinel-1 and Sentinel-2 imagery.:
 
 ```jsonc
 {
   "presets": [
     {
-      "name": "Sentinel-2 true colour",
-      "red": "B04", "green": "B03", "blue": "B02",
-      "range": "percentile",                     // 2% / 98% stretch, per channel
-      "contrast": 10, "saturation": 20
-    },
-    {
-      "name": "NDVI",
-      "variables": { "nir": "B08", "vis": "B04" },
-      "value": "(nir - vis) / (nir + vis)",
-      "range": [-1, 1], "colormap": "RdYlGn"
-    },
-    {
-      "name": "S1 RTC (dB × 100)",               // int16 = round(10·log10(γ⁰) · 100)
-      "red": "VV / 100", "green": "VH / 100", "blue": "(VV - VH) / 100",
-      "range": [[-25, 0], [-30, -5], [0, 15]],  // one [min, max] per channel
-      "match": { "fileName": ["*_a150.tif", "*_d069.tif"] }
-    },
-    {
-      "name": "Elevation",
-      "value": "b1", "range": "auto", "colormap": "terrain",
-      "match": { "fileName": "dem*.tif" }
-    }
-  ]
-}
-```
-
-### Simple Sentinel-2 true colour
-
-Sentinel Hub's [basic true colour script](https://custom-scripts.sentinel-hub.com/sentinel-2/true_color/) multiplies the reflectance of B04, B03 and B02 by 2.5, so reflectance 0 to 0.4 goes from black to full brightness. In this extension that is just a display range on the raw bands, which makes it the fastest true colour preset:
-
-```jsonc
-{
-  "presets": [
-    {
-      "name": "Sentinel-2 L2A true colour (simple)",
-      "red": "B04", "green": "B03", "blue": "B02",
-      "range": [1000, 5000],    // reflectance 0 … 0.4 with the 1000 offset; [0, 4000] before baseline 04.00
-      "match": { "bands": 13 }
-    }
-  ]
-}
-```
-
-It is a linear stretch, so vegetation (reflectance around 0.03 in red) looks dark, and bright surfaces above reflectance 0.4 (clouds, snow, bright sand) show as plain white. The Copernicus Browser version below brightens the darks and compresses the highlights instead, at about twice the rendering time. As there, the range assumes products from processing baseline 04.00 onwards, which add 1000 to every value; for older ones use `[0, 4000]`.
-
-### Copernicus Browser true colour
-
-The [Copernicus Browser](https://browser.dataspace.copernicus.eu/) shows Sentinel-2 L2A with its **True color** layer, the Sentinel Hub *optimized true colour* script: a contrast curve that puts reflectance 0.13 in the middle of its range and compresses highlights up to reflectance 3, a gamma of 1.8, a 1.2× saturation boost and sRGB encoding. This preset reproduces it exactly, up to 8-bit rounding (the tests check it against the script itself):
-
-```jsonc
-{
-  "presets": [
-    {
-      "name": "Sentinel-2 L2A true colour (Copernicus Browser)",
+      "name": "S2-L2A optimized true colour",    // https://custom-scripts.sentinel-hub.com/custom-scripts/sentinel-2/l2a_optimized/
       "variables": {
-        "ar": "clamp((B04 - 1000) / 10000 / 3, 0, 1)",
-        "ag": "clamp((B03 - 1000) / 10000 / 3, 0, 1)",
-        "ab": "clamp((B02 - 1000) / 10000 / 3, 0, 1)",
+        "ar": "clamp((B04 - 1000) / 10000 / 3, 0, 1)",   // remove "- 1000" for data before baseline 04.00
+        "ag": "clamp((B03 - 1000) / 10000 / 3, 0, 1)",   // remove "- 1000" for data before baseline 04.00
+        "ab": "clamp((B02 - 1000) / 10000 / 3, 0, 1)",   // remove "- 1000" for data before baseline 04.00
         "r": "((ar * (ar * (0.13 / 3) - 1) / (ar * (2 * 0.13 / 3 - 1) - 0.13 / 3) + 0.01) ^ 1.8 - 0.01 ^ 1.8) / (1.01 ^ 1.8 - 0.01 ^ 1.8)",
         "g": "((ag * (ag * (0.13 / 3) - 1) / (ag * (2 * 0.13 / 3 - 1) - 0.13 / 3) + 0.01) ^ 1.8 - 0.01 ^ 1.8) / (1.01 ^ 1.8 - 0.01 ^ 1.8)",
         "b": "((ab * (ab * (0.13 / 3) - 1) / (ab * (2 * 0.13 / 3 - 1) - 0.13 / 3) + 0.01) ^ 1.8 - 0.01 ^ 1.8) / (1.01 ^ 1.8 - 0.01 ^ 1.8)",
@@ -187,21 +123,49 @@ The [Copernicus Browser](https://browser.dataspace.copernicus.eu/) shows Sentine
       "red": "where(lr <= 0.0031308, 12.92 * lr, 1.055 * lr ^ 0.41666666666 - 0.055)",
       "green": "where(lg <= 0.0031308, 12.92 * lg, 1.055 * lg ^ 0.41666666666 - 0.055)",
       "blue": "where(lb <= 0.0031308, 12.92 * lb, 1.055 * lb ^ 0.41666666666 - 0.055)",
-      "match": { "bands": 13 }
+    },
+    {
+      "name": "S2-L2A simple true colour",    // https://custom-scripts.sentinel-hub.com/custom-scripts/sentinel-2/true_color/
+      "red": "B04", "green": "B03", "blue": "B02",
+      "range": [1000, 5000],    // reflectance 0 … 0.4 with the 1000 offset; [0, 4000] before baseline 04.00
+    },
+    {
+      "name": "S2-L2A NDVI",    // https://custom-scripts.sentinel-hub.com/custom-scripts/sentinel-2/ndvi/
+      "value": "(B08 - B04) / (B08 + B04)",
+      "range": [-1, 1],
+      "colormap": "RdYlGn"
+    },
+    {
+      "name": "S2-L2A scene classification",    // https://custom-scripts.sentinel-hub.com/sentinel-2/scene-classification/
+      "paletted": "SCL",
+      "classes": [    // colors are in the #rrggbbaa format
+        { "value": 0, "color": "#000000", "label": "No Data" },
+        { "value": 1, "color": "#ff0000", "label": "Saturated or defective pixel" },
+        { "value": 2, "color": "#2f2f2f", "label": "Topographic casted shadows" },
+        { "value": 3, "color": "#643200", "label": "Cloud shadow" },
+        { "value": 4, "color": "#00a000", "label": "Vegetation" },
+        { "value": 5, "color": "#ffe65a", "label": "Not-vegetated" },
+        { "value": 6, "color": "#0000ff", "label": "Water" },
+        { "value": 7, "color": "#808080", "label": "Unclassified" },
+        { "value": 8, "color": "#c0c0c0", "label": "Cloud (medium probability)" },
+        { "value": 9, "color": "#ffffff", "label": "Cloud (high probability)" },
+        { "value": 10, "color": "#64c8ff", "label": "Thin cirrus" },
+        { "value": 11, "color": "#ff96ff", "label": "Snow or ice" }
+      ]
     }
   ]
 }
 ```
 
-It is written for L2A products from **processing baseline 04.00 onwards**, whose bands store reflectance as `(DN - 1000) / 10000`. That covers everything processed since 25 January 2022, including older acquisitions that have been reprocessed (for example ESA's Collection-1 reprocessing, baselines 05.xx, which covers images back to 2015). The `PROCESSING_BASELINE` in the product metadata tells you which one you have. Sentinel Hub, and so the Copernicus Browser, remove this offset before applying the script, which is why the preset subtracts 1000.
+Add e.g. `"match": { "bands": 13 }` to one of them to apply it automatically to 13-band files.
 
-**Images processed before baseline 04.00** (no offset, reflectance `DN / 10000`) need the offset removed from the preset: use `clamp(B04 / 10000 / 3, 0, 1)` in `ar`, and likewise `B03` in `ag` and `B02` in `ab`; otherwise they look too dark. Change or remove `match` to suit your files.
+Useful trick: the SCL can also mask other renderings, since band names work in any expression: `where((SCL == 3) + (SCL == 8) + (SCL == 9) + (SCL == 10), 0, B04)` shows the red band with cloud shadows, clouds and cirrus in black.
 
 ## Overlays
 
-For a georeferenced image (a GeoTIFF with a coordinate system), **Overlays** in the toolbar opens a panel with a basemap, vector layers, and coordinates. The button is greyed out for other images. Everything is reprojected into the image's coordinate system and clipped to the image's extent: vector coordinates exactly as GDAL computes them, basemap tiles warped to within a tenth of an image pixel at worst (far less at normal zoom).
+For a georeferenced image (a GeoTIFF with a coordinate system), **Overlays** in the toolbar opens a panel with a basemap, vector layers, and coordinates. Everything is reprojected into the image's coordinate system and clipped to the image's extent.
 
-- **Show coordinates & scale**: ticks of the image's x coordinate along its lower border and of y along its left border, a thin grid of lines at the ticks, and a scale bar in metres or kilometres (true ground distance). They follow the zoom: the spacing adapts, and when the image's borders are out of view the ticks run along the edges of the view.
+- **Show coordinates & scale** (or <kbd>G</kbd>): ticks of the image's x and y coordinates along the respective borders, a thin grid of lines at the ticks, and a scale bar in metres or kilometres (true ground distance). They follow the zoom: the spacing adapts, and when the image's borders are out of view the ticks run along the edges of the view.
 - **Image opacity**: to see what is under the image.
 - **Basemap**: the selection of the [Basemaps QGIS plugin](https://github.com/Fanchengyan/Basemaps): Esri, Google, OpenStreetMap, OpenTopoMap, OpenRailwayMap, Bing, CARTO, F4map and USGS raster tiles; Esri and OpenFreeMap vector tiles (drawn with MapLibre); and the EOX Sentinel-2 cloudless mosaics (by year), Esri World Imagery Wayback (by date) and NASA GIBS (layers and dates) tile services, whose layer lists are read from the services. The basemap has its own opacity and goes under the image, or above it. Its attribution is shown in the corner.
 - **Vector layers**: type a path, absolute or relative to the workspace folder, or **Browse…**. GeoJSON, KML, KMZ, Shapefile (with its .dbf, .prj, .cpg), GeoPackage (one layer per feature table), and zips of these are read, in any coordinate system they declare. When a file holds several layers (KML/KMZ folders, GeoPackage tables, files in a zip), you are asked which ones to load. Each layer has its own colour, line width, opacity, visibility, *zoom to layer* and remove. File Geodatabases (.gdb) are not supported: export them to GeoPackage.

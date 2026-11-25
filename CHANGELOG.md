@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+- Press <kbd>Space</kbd> to show the pixel readout as a table next to the cursor, with each band's name and value; press it again to go back to the status bar.
+- The pixel readout follows the cursor while it moves, instead of waiting for it to stop.
+- The status bar separates band values with a vertical bar.
+- For GeoTIFFs, the status bar and the value table show the longitude and latitude of the pixel under the cursor, and the status bar shows the coordinate system (e.g. EPSG:32723).
+- Many band values no longer push the right side of the status bar out of view: they end in … instead.
+- Ctrl+scroll zoom refreshes the readout straight away.
+- `nodata` in band expressions: a missing value (shown transparent), e.g. `where(SCL == 9, nodata, B04)`; `x == nodata` tests whether `x` is missing.
+- <kbd>G</kbd> shows or hides the coordinates, grid and scale bar of GeoTIFFs (**Show coordinates & scale**).
+- The <kbd>I</kbd> and <kbd>B</kbd> keys no longer open the Info and Rendering panels: use the toolbar buttons.
+- After a preset is chosen, a button clicked or a slider moved, the keyboard goes back to the image (so Space and the other keys act on the viewer), and the Rendering panel no longer puts the cursor in the first expression when it opens.
+- The README's example presets are now four for Sentinel-2 L2A: optimized and simple true colour, NDVI and scene classification (SCL), each explained.
+
 ## 0.4.0
 
 - **Overlays** for GeoTIFFs (the button is greyed out for other images), reprojected into the image's coordinate system and clipped to its extent:

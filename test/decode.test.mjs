@@ -391,5 +391,37 @@ await test('nearest sampling for huge windows skips work', () =>
   }),
 );
 
+console.log('Pixel readout');
+await test('pixel values from the tile cache equal geotiff.js readRasters, in every fixture', async () => {
+  const { readdirSync } = await import('node:fs');
+  let checked = 0;
+  for (const name of readdirSync(fixtures).filter((n) => /\.tiff?$/.test(n)).sort()) {
+    const tiff = await openFixture(name).catch(() => undefined);
+    if (!tiff) continue;
+    try {
+      for (const page of tiff.pages) {
+        if (page.info.unsupported) continue;
+        const image = page.images[0];
+        const w = image.getWidth();
+        const h = image.getHeight();
+        const tw = image.getTileWidth();
+        const th = image.getTileHeight();
+        // Corners, the centre, and both sides of the first tile boundaries.
+        const points = [[0, 0], [w - 1, h - 1], [w >> 1, h >> 1], [Math.min(w - 1, tw - 1), Math.min(h - 1, th - 1)], [Math.min(w - 1, tw), Math.min(h - 1, th)], [w - 1, 0], [0, h - 1]];
+        for (const [x, y] of points) {
+          const expected = (await image.readRasters({ window: [x, y, x + 1, y + 1], interleave: false })).map((r) => Number(r[0]));
+          const actual = await lib.readPixel(page, x, y);
+          assert.deepEqual(actual, expected, `${name} page ${page.info.index ?? ''} pixel (${x}, ${y})`);
+          checked++;
+        }
+      }
+    } finally {
+      await tiff.close();
+    }
+  }
+  assert.ok(checked > 100, `only ${checked} pixels checked`);
+  console.log(`    (${checked} pixels compared)`);
+});
+
 console.log(failures ? `\n${failures} test(s) failed` : '\nAll tests passed');
 process.exit(failures ? 1 : 0);

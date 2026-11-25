@@ -147,6 +147,14 @@ export class Overlays {
     return !!this.mapper;
   }
 
+  /** Shows or hides the coordinate ticks, grid and scale bar (the button, and the G key). */
+  toggleTicks(): void {
+    if (!this.mapper) return;
+    this.ticks = !this.ticks;
+    $<HTMLButtonElement>('ticksToggle').setAttribute('aria-pressed', String(this.ticks));
+    this.host.redraw();
+  }
+
   /** Whether the image must be drawn on its own layer (something under it, or see-through). */
   get layered(): boolean {
     return !!this.mapper && ((!!this.basemap && !this.basemapAbove && this.basemapOpacity > 0) || this.imageOpacity < 1);
@@ -752,12 +760,7 @@ export class Overlays {
       panel.hidden = !panel.hidden;
       toggle.setAttribute('aria-pressed', String(!panel.hidden));
     });
-    const ticks = $<HTMLButtonElement>('ticksToggle');
-    ticks.addEventListener('click', () => {
-      this.ticks = !this.ticks;
-      ticks.setAttribute('aria-pressed', String(this.ticks));
-      this.host.redraw();
-    });
+    $<HTMLButtonElement>('ticksToggle').addEventListener('click', () => this.toggleTicks());
     const percent = (sliderId: string, numberId: string, set: (v: number) => void) => {
       const slider = $<HTMLInputElement>(sliderId);
       const number = $<HTMLInputElement>(numberId);

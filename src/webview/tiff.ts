@@ -1152,6 +1152,22 @@ export async function readStatsSample(page: Page, samples = page.samples, option
 
 export async function readPixel(page: Page, x: number, y: number): Promise<number[]> {
   const image = page.images[0];
+  // From the decoded tile, through the tile cache: a pointer moving over the image
+  // reads its neighbours from the same tile, so only the first pixel decodes it.
+  try {
+    const tw = image.getTileWidth();
+    const th = image.getTileHeight();
+    const tx = Math.floor(x / tw);
+    const ty = Math.floor(y / th);
+    const samples = Array.from({ length: image.getSamplesPerPixel() }, (_, i) => i);
+    const planes = await readTilePlanes(image, tx, ty, samples, 1);
+    const p = (y - ty * th) * tw + (x - tx * tw);
+    if (planes.every(({ array, stride, offset }) => p * stride + offset < array.length)) {
+      return planes.map(({ array, stride, offset }) => Number(array[p * stride + offset]));
+    }
+  } catch {
+    // Fall back to geotiff.js below.
+  }
   const rasters = (await image.readRasters({ window: [x, y, x + 1, y + 1], interleave: false })) as unknown as Sample[];
   return rasters.map((r) => Number(r[0]));
 }

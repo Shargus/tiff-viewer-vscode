@@ -18,7 +18,8 @@
  */
 
 type Node =
-  | { kind: 'num'; value: number }
+  /** A constant; `nodata` marks the `nodata` keyword (a missing value, NaN). */
+  | { kind: 'num'; value: number; nodata?: true }
   | { kind: 'band'; sample: number }
   | { kind: 'var'; index: number }
   | { kind: 'neg'; arg: Node }
@@ -118,7 +119,15 @@ function parse(
     const left = sum();
     if (isOp('<', '<=', '>', '>=', '==', '!=')) {
       const op = tokens[i++].text;
-      return { kind: 'bin', op, left, right: sum() };
+      const right = sum();
+      // x == nodata tests whether x is missing (NaN never equals itself), x != nodata the opposite.
+      const isNoData = (n: Node) => n.kind === 'num' && n.nodata === true;
+      if ((op === '==' || op === '!=') && (isNoData(left) || isNoData(right))) {
+        const other = isNoData(left) ? right : left;
+        const missing: Node = { kind: 'call', fn: 'isnan', args: [other] };
+        return op === '==' ? missing : { kind: 'bin', op: '-', left: { kind: 'num', value: 1 }, right: missing };
+      }
+      return { kind: 'bin', op, left, right };
     }
     return left;
   };
@@ -193,6 +202,7 @@ function parse(
         return { kind: 'band', sample: bands[t.text] };
       }
       if (t.text === 'pi') return { kind: 'num', value: Math.PI };
+      if (t.text === 'nodata') return { kind: 'num', value: NaN, nodata: true };
       if (laterVariables?.has(t.text)) {
         throw new ExpressionError(`'${t.text}' is defined after this variable; a variable can only use the ones before it`, t.pos);
       }
@@ -323,8 +333,8 @@ export function compileExpressions(
   const hasVariables = names.length > 0;
   for (const [position, [name, source]] of Object.entries(variables).entries()) {
     try {
-      if (!IDENTIFIER.test(name) || FUNCTIONS[name] || name === 'pi') {
-        throw new ExpressionError(`'${name}' cannot be a variable name: use letters, digits and _, not starting with a digit, and not a function name`, 0);
+      if (!IDENTIFIER.test(name) || FUNCTIONS[name] || name === 'pi' || name === 'nodata') {
+        throw new ExpressionError(`'${name}' cannot be a variable name: use letters, digits and _, not starting with a digit, and not a function name, pi or nodata`, 0);
       }
       variableTrees.push(parse(String(source), bands, variableIndex, new Set(names.slice(position))));
       variableIndex.set(name, variableTrees.length - 1);
@@ -430,5 +440,5 @@ export function bandIdentifier(description: string): string | undefined {
   const name = description.trim().replace(/[^A-Za-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
   if (!name) return undefined;
   const id = /^[0-9]/.test(name) ? `_${name}` : name;
-  return FUNCTIONS[id] || id === 'pi' ? undefined : id;
+  return FUNCTIONS[id] || id === 'pi' || id === 'nodata' ? undefined : id;
 }

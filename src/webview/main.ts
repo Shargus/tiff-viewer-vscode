@@ -30,6 +30,7 @@ import {
   type RangeSetting,
 } from '../shared/presets';
 import { toBytes } from './bytes';
+import { GeoMapper } from './geo';
 import { Overlays } from './overlays';
 import type {
   FileInfo,
@@ -91,6 +92,9 @@ const statusSize = $<HTMLSpanElement>('statusSize');
 const statusProgress = $<HTMLSpanElement>('statusProgress');
 const statusFileSize = $<HTMLSpanElement>('statusFileSize');
 const statusPos = $<HTMLSpanElement>('statusPos');
+const statusCrs = $<HTMLSpanElement>('statusCrs');
+/** Pixel to longitude/latitude for a georeferenced page. */
+let geoMapper: GeoMapper | undefined;
 const statusValue = $<HTMLSpanElement>('statusValue');
 
 interface DisplayTile {
@@ -130,7 +134,16 @@ const failed = new Set<string>();
 let viewLevel = 0;
 let tilesTimer: ReturnType<typeof setTimeout> | undefined;
 let requestCounter = 0;
+/** The latest pixel readout requested (0: the pointer is not over the image), and its pixel. */
 let pixelReq = 0;
+let requestedPixel = '';
+let requestedComposite: unknown;
+/** The readout last shown: a pixel and its values, as the worker answered. */
+let shownReq = 0;
+let shown: { x: number; y: number; values: number[] | null; computed?: number[] } | undefined;
+/** Whether the value table is on (Space toggles it), and where the pointer is (client coordinates). */
+let tipOn = false;
+let pointer: { x: number; y: number } | undefined;
 /** Dimensions of the page last shown, to keep the view across file reloads. */
 let shownSize = '';
 
@@ -283,8 +296,13 @@ async function onWorkerMessage(message: WorkerToMain): Promise<void> {
       }
       break;
     case 'pixel':
-      if (message.reqId === pixelReq) {
-        statusValue.textContent = formatValues(message.values, message.computed);
+      // Answers come one at a time, the newest request next: show each (not only the
+      // latest request's), so the readout follows a moving pointer. Its pixel is shown
+      // with its values, never the pointer's newer position with older values.
+      if (pixelReq !== 0 && message.reqId > shownReq && message.reqId <= pixelReq) {
+        shownReq = message.reqId;
+        shown = { x: message.x, y: message.y, values: message.values, computed: message.computed };
+        renderReadout();
       }
       break;
   }
@@ -378,6 +396,14 @@ function selectPage(index: number, keepView = false): void {
   compositeToggle.hidden = !!page.unsupported;
 
   statusSize.textContent = `${page.width} × ${page.height}`;
+  try {
+    geoMapper = page.geo ? new GeoMapper(page.geo) : undefined;
+  } catch {
+    geoMapper = undefined;
+  }
+  // The coordinate system: its EPSG code, or its name when it has none.
+  statusCrs.textContent = page.geo ? (/^EPSG:\d+/.exec(page.geo.crsName)?.[0] ?? page.geo.crsName) : '';
+  statusCrs.title = page.geo ? `Coordinate system: ${page.geo.crsName}` : '';
   renderInfo();
   overlays.setPage(page);
 
@@ -777,30 +803,179 @@ function formatNumber(value: number): string {
   return Number(value.toPrecision(6)).toString();
 }
 
+/** A band value as shown: NoData values are labelled as such. */
+function showValue(page: PageInfo, v: number): string {
+  return page.noData !== null && v === page.noData ? 'NoData' : formatNumber(v);
+}
+
+/** A composite's computed value, with its class label in paletted mode. */
+function showComputed(v: number): string {
+  if (Number.isNaN(v)) return 'NoData';
+  const classes = composite?.classes;
+  if (!classes) return formatNumber(v);
+  const match = classes.find((c) => Math.fround(c.value) === Math.fround(v));
+  return match ? `${formatNumber(v)}${match.label && match.label !== formatNumber(v) ? ` (${match.label})` : ''}` : `${formatNumber(v)} (no class)`;
+}
+
+/** Labels of a composite's computed values: R, G, B, or none for a single value. */
+function computedLabels(computed: number[]): string[] {
+  return computed.length === 3 ? ['R', 'G', 'B'] : [''];
+}
+
+const VALUE_SEPARATOR = '  |  ';
+
 function formatValues(values: number[] | null, computed?: number[]): string {
   const page = currentPage();
   if (!values || !page) {
     return '';
   }
-  // NoData values (and composite values computed from them) are labelled as such.
-  const show = (v: number) => (page.noData !== null && v === page.noData ? 'NoData' : formatNumber(v));
   let text =
     values.length === 1
-      ? `${page.sampleLabels[0]}: ${show(values[0])}`
-      : values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${show(v)}`).join('  ');
+      ? `${page.sampleLabels[0]}: ${showValue(page, values[0])}`
+      : values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${showValue(page, v)}`).join(VALUE_SEPARATOR);
   if (computed?.length) {
-    const labels = computed.length === 3 ? ['R', 'G', 'B'] : [''];
-    const classes = composite?.classes;
-    const result = (v: number) => {
-      if (Number.isNaN(v)) return 'NoData';
-      if (!classes) return formatNumber(v);
-      const match = classes.find((c) => Math.fround(c.value) === Math.fround(v));
-      return match ? `${formatNumber(v)}${match.label && match.label !== formatNumber(v) ? ` (${match.label})` : ''}` : `${formatNumber(v)} (no class)`;
-    };
-    text = `${computed.map((v, i) => `${labels[i]}${labels[i] ? ' ' : ''}${result(v)}`).join('  ')}   ←   ${text}`;
+    const labels = computedLabels(computed);
+    text = `${computed.map((v, i) => `${labels[i]}${labels[i] ? ' ' : ''}${showComputed(v)}`).join(VALUE_SEPARATOR)}   ←   ${text}`;
   }
   return text;
 }
+
+/** Longitude and latitude of the centre of pixel (x, y), for a georeferenced page; '' otherwise. */
+function formatLonLat(x: number, y: number): string {
+  if (!geoMapper) return '';
+  const [lon, lat] = geoMapper.pixelToLonLat(x + 0.5, y + 0.5);
+  // Six decimals: about 0.1 m.
+  return Number.isFinite(lon) && Number.isFinite(lat) ? `lon ${lon.toFixed(6)}, lat ${lat.toFixed(6)}` : '';
+}
+
+// --- Pixel readout: in the status bar, or in a table next to the pointer (Space) ---
+
+const pixelTip = $<HTMLDivElement>('pixelTip');
+
+/** Shows the pixel readout: in the value table when it is on, otherwise in the status bar. */
+function renderReadout(): void {
+  if (!shown || pixelReq === 0) {
+    statusPos.textContent = '';
+    statusValue.textContent = '';
+    pixelTip.hidden = true;
+    return;
+  }
+  if (tipOn) {
+    statusPos.textContent = '';
+    statusValue.textContent = '';
+  } else {
+    const lonLat = formatLonLat(shown.x, shown.y);
+    statusPos.textContent = lonLat ? `x ${shown.x}, y ${shown.y}  |  ${lonLat}` : `x ${shown.x}, y ${shown.y}`;
+    statusValue.textContent = formatValues(shown.values, shown.computed);
+  }
+  updatePixelTip();
+}
+
+/** The band values of the pixel under the pointer, in a table next to it, while the table is on. */
+function updatePixelTip(): void {
+  const page = currentPage();
+  const hovered = shown;
+  if (!tipOn || !pointer || pixelReq === 0 || !hovered?.values || !page) {
+    pixelTip.hidden = true;
+    return;
+  }
+  const row = (name: string, value: string, className?: string) => {
+    const tr = document.createElement('tr');
+    if (className) tr.className = className;
+    const th = Object.assign(document.createElement('th'), { scope: 'row', textContent: name });
+    tr.append(th, Object.assign(document.createElement('td'), { textContent: value }));
+    return tr;
+  };
+  const caption = document.createElement('caption');
+  caption.append(`x ${hovered.x}, y ${hovered.y}`);
+  const lonLat = formatLonLat(hovered.x, hovered.y);
+  if (lonLat) caption.append(document.createElement('br'), lonLat);
+  const head = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  headRow.append(Object.assign(document.createElement('th'), { scope: 'col', textContent: 'Band' }), Object.assign(document.createElement('th'), { scope: 'col', textContent: 'Value' }));
+  head.append(headRow);
+  const body = document.createElement('tbody');
+  // The band's name in the file (GDAL description, e.g. B04), else b1…bN.
+  hovered.values.forEach((v, i) => body.append(row(page.bandNames[i] || `b${i + 1}`, showValue(page, v))));
+  const table = document.createElement('table');
+  table.append(caption, head, body);
+  if (hovered.computed?.length) {
+    // The rendered composite's values, below the bands.
+    const result = document.createElement('tbody');
+    result.className = 'computed';
+    const labels = computedLabels(hovered.computed);
+    hovered.computed.forEach((v, i) => result.append(row(labels[i] ? `Rendered ${labels[i]}` : 'Rendered', showComputed(v))));
+    table.append(result);
+  }
+  pixelTip.replaceChildren(table);
+  pixelTip.hidden = false;
+  placePixelTip();
+}
+
+/** Puts the value table beside the pointer, flipped to stay inside the image area. */
+function placePixelTip(): void {
+  if (pixelTip.hidden || !pointer) return;
+  const rect = stage.getBoundingClientRect();
+  const gap = 14;
+  const w = pixelTip.offsetWidth;
+  const h = pixelTip.offsetHeight;
+  let left = pointer.x - rect.left + gap;
+  let top = pointer.y - rect.top + gap;
+  if (left + w > rect.width - 4) left = pointer.x - rect.left - gap - w;
+  if (top + h > rect.height - 4) top = pointer.y - rect.top - gap - h;
+  pixelTip.style.left = `${Math.max(4, left)}px`;
+  pixelTip.style.top = `${Math.max(4, top)}px`;
+}
+
+const TEXT_INPUTS = new Set(['text', 'number', 'search', 'url', 'email', 'password', 'tel']);
+
+/** Whether `target` takes typed text (where Space is a character). */
+function isTyping(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLInputElement && TEXT_INPUTS.has(target.type)) ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
+// Space turns the value table on and off everywhere except in text fields: it does
+// not press a focused button, tick a checkbox or open a dropdown.
+window.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key !== ' ' || event.ctrlKey || event.metaKey || event.altKey || isTyping(event.target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return;
+    tipOn = !tipOn;
+    renderReadout();
+  },
+  { capture: true },
+);
+// Space is what presses buttons and ticks boxes on key up: cancel that too.
+window.addEventListener(
+  'keyup',
+  (event) => {
+    if (event.key === ' ' && !isTyping(event.target)) event.preventDefault();
+  },
+  { capture: true },
+);
+
+// Controls give the keyboard back to the image once used (a chosen preset, a clicked
+// button, a moved slider), so that Space and the other keys act on the viewer.
+// Text fields keep it, and so does a control that moved the focus elsewhere itself.
+const returnFocus = (control: Element) => {
+  if (document.activeElement === control || document.activeElement === document.body) stage.focus({ preventScroll: true });
+};
+document.addEventListener('change', (event) => {
+  const t = event.target;
+  if ((t instanceof HTMLSelectElement || t instanceof HTMLInputElement) && !isTyping(t)) returnFocus(t);
+});
+document.addEventListener('click', (event) => {
+  const button = event.target instanceof Element ? event.target.closest('button') : null;
+  // detail 0: pressed from the keyboard, where moving the focus would be unexpected.
+  if (button && event.detail > 0) returnFocus(button);
+});
 
 function formatBytes(bytes: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -906,6 +1081,8 @@ stage.addEventListener(
       const [x, y] = stagePoint(event);
       const delta = Math.max(-100, Math.min(100, event.deltaY * lineScale));
       zoomTo(view.scale * Math.exp(-delta * 0.01), x, y);
+      // The pixel under the pointer may change: refresh the readout and the value table.
+      updatePointerReadout(event);
     } else {
       view.tx -= event.deltaX * lineScale;
       view.ty -= event.deltaY * lineScale;
@@ -949,10 +1126,18 @@ const endDrag = (event: PointerEvent) => {
 };
 stage.addEventListener('pointerup', endDrag);
 stage.addEventListener('pointercancel', endDrag);
+// Take keyboard focus when the pointer enters the image, so that Space toggles the
+// value table without clicking first: while another part of VS Code has focus, key
+// presses never reach the viewer. An input in the side panels keeps its focus.
+stage.addEventListener('pointerenter', () => {
+  if (!document.hasFocus() || !isTyping(document.activeElement)) stage.focus({ preventScroll: true });
+});
+
 stage.addEventListener('pointerleave', () => {
-  statusPos.textContent = '';
-  statusValue.textContent = '';
   pixelReq = 0;
+  requestedPixel = '';
+  pointer = undefined;
+  renderReadout();
 });
 
 stage.addEventListener('dblclick', (event) => {
@@ -972,13 +1157,19 @@ function updatePointerReadout(event: MouseEvent): void {
   const [px, py] = stagePoint(event);
   const x = Math.floor((px - view.tx) / view.scale);
   const y = Math.floor((py - view.ty) / view.scale);
+  pointer = { x: event.clientX, y: event.clientY };
   if (x < 0 || y < 0 || x >= page.width || y >= page.height) {
-    statusPos.textContent = '';
-    statusValue.textContent = '';
     pixelReq = 0;
+    requestedPixel = '';
+    renderReadout();
     return;
   }
-  statusPos.textContent = `x ${x}, y ${y}`;
+  placePixelTip();
+  // One request per pixel (and rendering): moving within a pixel asks nothing new.
+  const key = `${pageIndex}:${x}:${y}`;
+  if (key === requestedPixel && composite === requestedComposite && pixelReq !== 0) return;
+  requestedPixel = key;
+  requestedComposite = composite;
   pixelReq = ++requestCounter;
   postToWorker({ type: 'pixel', reqId: pixelReq, page: pageIndex, x, y, composite });
 }
@@ -1012,15 +1203,11 @@ document.addEventListener('keydown', (event) => {
     case '[':
       changePage(-1);
       break;
-    case 'i':
-    case 'I':
-      if (mod) handled = false;
-      else toggleInfo();
-      break;
-    case 'b':
-    case 'B':
-      if (mod || compositeToggle.hidden) handled = false;
-      else toggleComposite();
+    case 'g':
+    case 'G':
+      // Coordinates & scale, for georeferenced images.
+      if (mod || !overlays.available) handled = false;
+      else overlays.toggleTicks();
       break;
     case 'ArrowLeft':
     case 'ArrowRight':
@@ -1914,7 +2101,6 @@ function showComposite(show: boolean): void {
 
 function toggleComposite(): void {
   showComposite(compositePanel.hidden);
-  if (!compositePanel.hidden) (lastExpression ?? rows[0]?.expression)?.focus();
 }
 
 compositeToggle.addEventListener('click', toggleComposite);
