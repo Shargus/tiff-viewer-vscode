@@ -2,7 +2,7 @@
   "name": "tiff-viewer-vscode",
   "displayName": "TIFF Viewer VS Code",
   "description": "View TIFF, BigTIFF and GeoTIFF images in VS Code, including files far larger than memory: band composites and band math for multi-band imagery (Sentinel-1, Sentinel-2) with presets, multi-page, tiled, pyramidal (COG), 1–64-bit and float data, and LZW / Deflate / JPEG / ZSTD / WebP / LERC / PackBits / CCITT fax compression.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "shargus",
   "author": {
     "name": "Shargus"
