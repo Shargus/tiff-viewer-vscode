@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0
+
+- **Layers**, as in QGIS (the Layers panel replaces Overlays): GeoTIFFs (**R**), vector layers (**V**) and online basemaps (**B**) in one list, with **+ Add layer…** and **+ Add basemap…**. Drag **⠿** to reorder, click it to select a layer; each layer has its visibility, opacity, *zoom to layer* and remove. The TIFF the viewer was opened on is a layer like the others; removing every layer leaves an empty canvas, ready for new layers. Files with several layers (KML folders, GeoPackage tables, zips) ask which to load.
+- **Raster layers**: other GeoTIFFs, each decoded on its own (large, tiled and pyramidal files included) and drawn at the resolution the zoom needs, exactly in the same coordinate system, warped otherwise.
+- **Basemaps** are layers, added at the bottom of the list; several can be stacked. Their rendering is their localisation: label language and region for Google and Bing, label language for OpenFreeMap.
+- **Coordinate system**: click it in the status bar to draw everything in WGS 84, Web Mercator, a layer's coordinate system or any EPSG code; rasters and basemaps are warped, vector layers projected, ticks and scale bar follow.
+- **Unbounded view** (globe in the status bar, or <kbd>U</kbd>): pan and zoom over the whole world, on an empty chequered canvas, and add layers anywhere. Otherwise the view is bounded by the extent of the file the viewer was opened on: layers outside it are refused, and those already added are struck through in the list.
+- **Rendering panel** for every layer: a **Layer** menu (or click a layer's name) chooses what it edits. Rasters have the raster view, with the **Preset** menu (moved from the toolbar), the layer's own **Bands**, and a new **Variables** section (**+ Add variable**, edit in place, drag to reorder, saved with the preset); vector layers have colour, line width and fill opacity; basemaps their language and region.
+- **Status bar**: the pixel and its longitude / latitude (of the selected raster), and three icon buttons: Unbounded view, Show coordinates & scale (<kbd>G</kbd>), and Show band and rendered values on hovering (<kbd>Space</kbd>). Band and rendered values are only in that table, which lists every layer under the pointer: each raster's pixel and the attributes of the vector features there. The Info panel describes the selected raster.
+- **Vector files** open in the viewer with **Open With… → TIFF Viewer (vector layer)**: the file is the first layer.
+- The **mouse wheel zooms** around the pointer; the view is panned by dragging, or with the arrow keys.
+- Side panels have a **×** to close them, and can be resized by dragging their left border (double-click: default width); sizes last until the viewer is closed.
+- Fixed: lines and blurred blobs along the image's border when it is drawn in another coordinate system.
+
 ## 0.5.0
 
 - Press <kbd>Space</kbd> to show the pixel readout as a table next to the cursor, with each band's name and value; press it again to go back to the status bar.

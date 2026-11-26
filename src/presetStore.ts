@@ -14,12 +14,12 @@ const FORMATTING: FormattingOptions = { insertSpaces: true, tabSize: 2, eol: '\n
 /** Written when the file does not exist yet: documentation and a commented-out example. */
 const INITIAL_CONTENT = `// Band rendering presets for the TIFF Viewer VS Code extension.
 //
-// Presets appear in the viewer's "Bands" menu. Write them here, or use
-// "Save as preset…" in the viewer's Rendering panel (it edits this file and
+// Presets appear in the Preset menu of the viewer's Rendering panel. Write them
+// here, or use "Save as preset…" in that panel (it edits this file and
 // keeps your comments). Open viewers pick up changes when the file is saved.
 //
 // Each preset:
-//   "name"                  Shown in the Bands menu.
+//   "name"                  Shown in the Rendering panel's Preset menu.
 //   "red", "green", "blue"  An RGB composite: one expression per channel, e.g. "B04 / 3000".
 //   "value"                 Or a single expression, shown with "colormap".
 //   "paletted"              Or paletted / unique values (as in QGIS): the band (or expression) whose

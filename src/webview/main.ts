@@ -29,9 +29,12 @@ import {
   type Preset,
   type RangeSetting,
 } from '../shared/presets';
+import { drawWarped, LANGUAGES, REGIONS } from './basemap';
 import { toBytes } from './bytes';
 import { GeoMapper } from './geo';
-import { Overlays } from './overlays';
+import { crsKey, crsOfGeo, imageGrid, outlinePath, warpedGrid, windowReference, type CanvasGrid, type Crs, type GridReference } from './grid';
+import { Layers, type LayerChoice } from './layers';
+import type { RasterLayer } from './rasterLayer';
 import type {
   FileInfo,
   HostToWebview,
@@ -85,6 +88,7 @@ const pageSelect = $<HTMLSelectElement>('page');
 const zoomLabel = $<HTMLSpanElement>('zoomLabel');
 const infoToggle = $<HTMLButtonElement>('infoToggle');
 const infoPanel = $<HTMLElement>('info');
+const infoContent = $<HTMLDivElement>('infoContent');
 const progress = $<HTMLDivElement>('progress');
 const progressBar = $<HTMLDivElement>('progressBar');
 const messageBox = $<HTMLDivElement>('message');
@@ -95,7 +99,7 @@ const statusPos = $<HTMLSpanElement>('statusPos');
 const statusCrs = $<HTMLSpanElement>('statusCrs');
 /** Pixel to longitude/latitude for a georeferenced page. */
 let geoMapper: GeoMapper | undefined;
-const statusValue = $<HTMLSpanElement>('statusValue');
+const valuesToggle = $<HTMLButtonElement>('valuesToggle');
 
 interface DisplayTile {
   z: number;
@@ -105,9 +109,22 @@ interface DisplayTile {
   /** Tiles of an older generation (before a tone change) are shown until replaced. */
   generation: number;
   used: number;
+  /** Where the tile goes in a warped grid (mesh points in grid pixels), and for which grid. */
+  mesh?: Float64Array;
+  meshGrid?: CanvasGrid;
 }
 
 let worker: Worker | undefined;
+/** The grid everything is drawn in: the image's pixels, or another coordinate system (Layers panel). */
+let grid: CanvasGrid | undefined;
+/** The grid's georeferencing as a mapper (pointer → longitude / latitude). */
+let gridMapper: GeoMapper | undefined;
+let chosenCrs: Crs | undefined;
+/** The opened file's layer was removed (the viewer stays the file's). */
+let imageGone = false;
+/** The opened file is a vector file (it was added as a vector layer). */
+let vectorFile = false;
+const EMPTY_MESSAGE = 'No layers. Add them with + Add layer… in the Layers panel.';
 let fileName = '';
 let info: FileInfo | undefined;
 /** Rough compressed size of one pixel, to estimate how much a view needs to read. */
@@ -144,11 +161,21 @@ let shown: { x: number; y: number; values: number[] | null; computed?: number[] 
 /** Whether the value table is on (Space toggles it), and where the pointer is (client coordinates). */
 let tipOn = false;
 let pointer: { x: number; y: number } | undefined;
+/** The pointer in grid pixels, while it is over the image. */
+let pointerGrid: [number, number] | undefined;
 /** Dimensions of the page last shown, to keep the view across file reloads. */
 let shownSize = '';
 
 function currentPage(): PageInfo | undefined {
   return info?.pages[pageIndex];
+}
+
+function imageInfo(): FileInfo | undefined {
+  return info;
+}
+
+function currentPageIndex(): number {
+  return pageIndex;
 }
 
 function postToWorker(message: MainToWorker, transfer: Transferable[] = []): void {
@@ -163,18 +190,22 @@ function postToWorker(message: MainToWorker, transfer: Transferable[] = []): voi
 let helpers: Worker[] = [];
 const HELPER_COUNT = Math.max(0, Math.min(6, (navigator.hardwareConcurrency || 2) - 1));
 
-async function createWorker(): Promise<Worker> {
+let workerCode: Promise<string> | undefined;
+
+/** A decoder worker (with `helperCount` decode helpers) whose messages go to `onMessage`. */
+async function createWorker(onMessage: (message: WorkerToMain) => void, helperCount = HELPER_COUNT): Promise<Worker> {
   // Webview resources are cross-origin for Worker(), so start it from a blob URL.
-  const response = await fetch(window.TIFF_WORKER_URL);
-  const code = await response.text();
+  workerCode ??= fetch(window.TIFF_WORKER_URL).then((response) => response.text());
+  workerCode.catch(() => (workerCode = undefined));
+  const code = await workerCode;
   const url = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
   const w = new Worker(url);
-  w.onmessage = (event: MessageEvent<WorkerToMain>) => void onWorkerMessage(event.data);
+  w.onmessage = (event: MessageEvent<WorkerToMain>) => onMessage(event.data);
   w.onerror = (event) => showMessage(`Decoder error: ${event.message}`);
   // Same script, started as decode helpers, each connected to the decoder worker by a channel.
   const ports: MessagePort[] = [];
   try {
-    for (let i = 0; i < HELPER_COUNT; i++) {
+    for (let i = 0; i < helperCount; i++) {
       const helper = new Worker(url);
       const channel = new MessageChannel();
       helper.postMessage({ type: 'helper', port: channel.port1 } satisfies MainToWorker, [channel.port1]);
@@ -210,7 +241,7 @@ async function start(fileSize: number): Promise<void> {
     return;
   }
   try {
-    worker = await createWorker();
+    worker = await createWorker((message) => void onWorkerMessage(message));
   } catch (error) {
     showMessage(`Could not start the decoder: ${String(error)}`);
     return;
@@ -284,16 +315,9 @@ async function onWorkerMessage(message: WorkerToMain): Promise<void> {
       }
       break;
     case 'classifyProgress':
-      if (message.reqId === classifyRequest) paletteNote.textContent = `Collecting values… ${Math.floor(message.fraction * 100)}%`;
-      break;
     case 'classified':
-      if (message.reqId === classifyRequest) onClassified(message.values, message.truncated);
-      break;
     case 'classifyError':
-      if (message.reqId === classifyRequest) {
-        endClassify();
-        showCompositeError(message.message);
-      }
+      if (!target) onClassifyMessage(message);
       break;
     case 'pixel':
       // Answers come one at a time, the newest request next: show each (not only the
@@ -385,27 +409,33 @@ function selectPage(index: number, keepView = false): void {
   clearTiles();
   showMessage(undefined);
 
-  if (!selectionResolved) {
+  if (target) {
+    // The Rendering panel shows a layer: resolve the image's own selection without it.
+    const saved = imageRenderState!;
+    if (!selectionResolved) {
+      selectionResolved = true;
+      saved.selection = initialSelection(page, fileName);
+    }
+    setImageComposite(compositeFor(saved.selection, page));
+  } else if (!selectionResolved) {
     selectionResolved = true;
-    applySelection(initialSelection(page), false);
+    applySelection(initialSelection(page, fileName), false);
   } else {
     // The band count may differ between pages; resolve the composite again.
     applySelection(selection, false);
   }
-  presetGroup.hidden = !!page.unsupported;
-  compositeToggle.hidden = !!page.unsupported;
-
-  statusSize.textContent = `${page.width} × ${page.height}`;
   try {
     geoMapper = page.geo ? new GeoMapper(page.geo) : undefined;
   } catch {
     geoMapper = undefined;
   }
-  // The coordinate system: its EPSG code, or its name when it has none.
-  statusCrs.textContent = page.geo ? (/^EPSG:\d+/.exec(page.geo.crsName)?.[0] ?? page.geo.crsName) : '';
-  statusCrs.title = page.geo ? `Coordinate system: ${page.geo.crsName}` : '';
-  renderInfo();
-  overlays.setPage(page);
+  layers.setPage(page, fileName);
+  rebuildGrid();
+  // The opened file's extent bounds the map.
+  layers.homeLabel = fileName;
+  layers.setHome(page);
+  // After the Layers panel knows the file's layer: the Rendering panel's menu lists it.
+  updateRenderingTarget();
 
   if (!sameSize) {
     fitMode = 'auto';
@@ -417,6 +447,102 @@ function selectPage(index: number, keepView = false): void {
     showProgress(0, 'Loading');
   }
   layout(0);
+}
+
+/** The grid for the current page and chosen coordinate system (the image's own when it cannot be warped). */
+function rebuildGrid(): void {
+  const page = currentPage();
+  let next: CanvasGrid | undefined;
+  let problem = '';
+  const own = page?.geo ? crsOfGeo(page.geo) : undefined;
+  if (page && (!page.geo || !chosenCrs || (own && crsKey(own) === crsKey(chosenCrs)))) {
+    // The opened file's own pixels: exact, nothing warped.
+    next = imageGrid(page);
+    if (own) chosenCrs = own;
+  } else if (chosenCrs) {
+    // Another coordinate system: over the opened file, or over the layers' extent.
+    const reference: GridReference | undefined = page?.geo ? page : (layers.homeReference ?? (grid && windowReference(grid, grid.bounds)));
+    try {
+      next = reference ? warpedGrid(reference, chosenCrs) : undefined;
+    } catch (error) {
+      problem = (error as Error).message;
+      next = grid;
+    }
+  }
+  setGrid(next);
+  if (problem) showMessage(problem);
+}
+
+function setGrid(next: CanvasGrid | undefined): void {
+  grid = next;
+  gridMapper = grid?.geo ? new GeoMapper(grid.geo) : undefined;
+  // The coordinate system: its EPSG code, or its name when it has none.
+  statusCrs.textContent = grid?.label ?? '';
+  statusCrs.hidden = !grid?.label;
+  statusCrs.title = grid?.geo ? `Coordinate system: ${grid.geo.crsName}. Click to change it.` : '';
+  layers.setGrid(grid, chosenCrs);
+}
+
+/** The first layer of an empty viewer: a grid over it, in its coordinate system. */
+function startGrid(reference: GridReference, crs: Crs): void {
+  chosenCrs = crs;
+  setGrid(warpedGrid(reference, crs));
+  showMessage(undefined);
+  fitMode = 'auto';
+  layout(0);
+}
+
+/** The viewer of a vector file: no TIFF to decode; the file is its first layer. */
+function startVector(uri: string, fileSize: number): void {
+  stopWorkers();
+  vectorFile = true;
+  imageGone = true;
+  info = undefined;
+  clearTiles();
+  statusFileSize.textContent = formatBytes(fileSize);
+  statusSize.textContent = '';
+  pageGroup.hidden = true;
+  layers.reset();
+  layers.setPage(undefined, fileName);
+  setGrid(undefined);
+  showProgress(undefined);
+  showMessage(`Reading ${fileName}…`);
+  updateRenderingTarget();
+  void layers.addPaths([uri]).then(() => {
+    if (!layers.count) showMessage(`${fileName} could not be shown: see the Layers panel.`);
+  });
+}
+
+/** The opened file's layer was removed: the other layers stay, in the same grid. */
+function imageRemoved(): void {
+  imageGone = true;
+  stopWorkers();
+  info = undefined;
+  clearTiles();
+  statusFileSize.textContent = '';
+  pageGroup.hidden = true;
+  pixelReq = 0;
+  shown = undefined;
+  if (!target) {
+    const next = layers.rasterChoices()[0];
+    if (next?.kind === 'raster') selectTarget(next.layer);
+  }
+  updateRenderingTarget();
+  renderInfo();
+  draw();
+}
+
+/**
+ * No layer is left: an empty canvas, in the same viewer (still the file's): the
+ * next layer added starts a new canvas, in its coordinate system.
+ */
+function allRemoved(): void {
+  chosenCrs = undefined;
+  layers.reset();
+  setGrid(undefined);
+  showMessage(EMPTY_MESSAGE);
+  updateRenderingTarget();
+  draw();
 }
 
 function topLevel(page: PageInfo): number {
@@ -442,6 +568,37 @@ function tileSpec(page: PageInfo, z: number, i: number, j: number): TileSpec {
 /** Image area in view, in full-resolution pixels. */
 function visibleWindow(page: PageInfo): PixelWindow | undefined {
   const s = view.scale;
+  if (grid && !grid.identity) {
+    // The view in grid pixels, back into the image's pixels (sampled: the warp bends edges).
+    const [bx0, by0, bx1, by1] = grid.bounds;
+    const gx0 = Math.max(bx0, -view.tx / s);
+    const gy0 = Math.max(by0, -view.ty / s);
+    const gx1 = Math.min(bx1, (stage.clientWidth - view.tx) / s);
+    const gy1 = Math.min(by1, (stage.clientHeight - view.ty) / s);
+    if (gx1 <= gx0 || gy1 <= gy0) return undefined;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let j = 0; j <= 8; j++) {
+      for (let i = 0; i <= 8; i++) {
+        const [x, y] = grid.image.toSource(gx0 + ((gx1 - gx0) * i) / 8, gy0 + ((gy1 - gy0) * j) / 8);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+    const pad = 2 + (maxX - minX) * 0.01;
+    const warped: PixelWindow = [
+      Math.max(0, Math.floor(minX - pad)),
+      Math.max(0, Math.floor(minY - pad)),
+      Math.min(page.width, Math.ceil(maxX + pad)),
+      Math.min(page.height, Math.ceil(maxY + pad)),
+    ];
+    return warped[2] > warped[0] && warped[3] > warped[1] ? warped : undefined;
+  }
   const visible: PixelWindow = [
     Math.max(0, Math.floor(-view.tx / s)),
     Math.max(0, Math.floor(-view.ty / s)),
@@ -512,7 +669,7 @@ function updateTiles(): void {
     return bytes;
   };
   // Always the full sharpness the zoom needs, however much data that is.
-  const z = Math.min(top, Math.max(0, Math.floor(Math.log2(1 / (view.scale * devicePixelRatio)))));
+  const z = Math.min(top, Math.max(0, Math.floor(Math.log2(1 / (view.scale * devicePixelRatio * (grid?.imageScale ?? 1))))));
   if (z !== viewLevel) {
     viewLevel = z;
     draw();
@@ -574,14 +731,20 @@ function dropStaleTiles(): void {
 // ---------------------------------------------------------------------------
 
 function fitScale(): number {
-  const page = currentPage();
-  if (!page) {
+  if (!grid) {
     return 1;
   }
-  return Math.min(stage.clientWidth / page.width, stage.clientHeight / page.height);
+  const [b0, b1, b2, b3] = grid.bounds;
+  return Math.min(stage.clientWidth / Math.max(1e-9, b2 - b0), stage.clientHeight / Math.max(1e-9, b3 - b1));
 }
 
 function minScale(): number {
+  if (layers.unbounded && grid?.geo) {
+    // The whole world fits in the view: 360° or 40 000 km across.
+    const res = Math.hypot(grid.geo.transform[1], grid.geo.transform[4]) || 1;
+    const world = (grid.geo.geographic ? 360 : 4.0075e7) / res;
+    return Math.min(fitScale() * 0.5, 1, stage.clientWidth / world);
+  }
   return Math.min(fitScale() * 0.5, 1);
 }
 
@@ -589,15 +752,19 @@ function maxScale(): number {
   return Math.max(MAX_ZOOM, fitScale() * 4);
 }
 
+/** Keeps the canvas's extent (all the layers) in view: centred when smaller than the view. */
 function clampView(): void {
-  const page = currentPage();
-  if (!page) {
+  // An unbounded map pans freely.
+  if (!grid || layers.unbounded) {
     return;
   }
-  const clampAxis = (offset: number, size: number, viewport: number) =>
-    size <= viewport ? (viewport - size) / 2 : Math.min(0, Math.max(viewport - size, offset));
-  view.tx = clampAxis(view.tx, page.width * view.scale, stage.clientWidth);
-  view.ty = clampAxis(view.ty, page.height * view.scale, stage.clientHeight);
+  const [b0, b1, b2, b3] = grid.bounds;
+  const clampAxis = (offset: number, lo: number, hi: number, viewport: number) => {
+    const size = (hi - lo) * view.scale;
+    return size <= viewport ? (viewport - size) / 2 - lo * view.scale : Math.min(-lo * view.scale, Math.max(viewport - hi * view.scale, offset));
+  };
+  view.tx = clampAxis(view.tx, b0, b2, stage.clientWidth);
+  view.ty = clampAxis(view.ty, b1, b3, stage.clientHeight);
 }
 
 function layout(delay?: number): void {
@@ -612,7 +779,7 @@ function layout(delay?: number): void {
 }
 
 function zoomTo(scale: number, anchorX = stage.clientWidth / 2, anchorY = stage.clientHeight / 2): void {
-  if (!currentPage()) {
+  if (!grid) {
     return;
   }
   const next = Math.min(maxScale(), Math.max(minScale(), scale));
@@ -630,7 +797,8 @@ function setFit(mode: 'auto' | 'fit'): void {
 
 function updateZoomLabel(): void {
   const percent = view.scale * 100;
-  zoomLabel.textContent = currentPage() ? `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%` : '–';
+  // Down to world scale on an unbounded map: two significant digits below 1%.
+  zoomLabel.textContent = grid ? `${percent >= 10 ? Math.round(percent) : percent >= 1 ? percent.toFixed(1) : Number(percent.toPrecision(2))}%` : '–';
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +826,7 @@ function checkerPattern(): CanvasPattern {
   return checker;
 }
 
-/** The image on its own layer, when overlays go under it or it is see-through. */
+/** The image on its own layer, when layers or a basemap go under it, it is see-through, or warped. */
 let imageLayer: HTMLCanvasElement | undefined;
 
 function draw(): void {
@@ -672,15 +840,40 @@ function draw(): void {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, width, height);
   const page = currentPage();
-  if (!page) {
+  if (!grid) {
     return;
   }
+  const viewState = { scale: view.scale, tx: view.tx, ty: view.ty, dpr, width: stage.clientWidth, height: stage.clientHeight };
+  const layered = layers.imageLayered;
+  // A chequerboard where nothing covers the canvas: under the layers' extent, or the
+  // opened file's outline when it is alone.
+  if (layers.unbounded) {
+    // A map with no edges: empty (chequered) everywhere the layers and basemaps leave uncovered.
+    ctx.fillStyle = checkerPattern();
+    ctx.fillRect(0, 0, width, height);
+  } else if (!page || layers.count > 1) {
+    const [b0, b1, b2, b3] = grid.bounds;
+    const x0 = Math.round((view.tx + b0 * view.scale) * dpr);
+    const y0 = Math.round((view.ty + b1 * view.scale) * dpr);
+    ctx.fillStyle = checkerPattern();
+    ctx.fillRect(x0, y0, Math.round((view.tx + b2 * view.scale) * dpr) - x0, Math.round((view.ty + b3 * view.scale) * dpr) - y0);
+  } else if (hasTransparency(page) || layered) {
+    ctx.save();
+    outlinePath(ctx, grid, view.scale, view.tx, view.ty, dpr);
+    ctx.fillStyle = checkerPattern();
+    ctx.fill();
+    ctx.restore();
+  }
+  layers.drawStack(ctx, viewState, () => page && drawImage(page, layered, width, height));
+  layers.drawTop(ctx, viewState);
+}
+
+/** The opened image: straight onto the canvas, or onto its own layer (to go over other layers, be see-through or warped). */
+function drawImage(page: PageInfo, layered: boolean, width: number, height: number): void {
   const visible = visibleWindow(page);
   if (!visible) {
     return;
   }
-  const viewState = { scale: view.scale, tx: view.tx, ty: view.ty, dpr, width: stage.clientWidth, height: stage.clientHeight };
-  const layered = overlays.layered;
   // Coarse levels first, finer ones on top. Finer tiles than the view needs
   // (left from zooming in) are drawn too, down to two levels below.
   const shown = [...tiles.values()]
@@ -697,13 +890,6 @@ function draw(): void {
     // by level alone let sharp tiles left from zooming in, rendered with older
     // settings, cover current ones for good.)
     .sort((a, b) => (a.generation === generation ? 1 : 0) - (b.generation === generation ? 1 : 0) || b.z - a.z || a.generation - b.generation);
-  if (hasTransparency(page) || layered) {
-    const [x0, y0, x1, y1] = deviceRect(page, [0, 0, page.width, page.height]);
-    ctx.fillStyle = checkerPattern();
-    ctx.fillRect(Math.max(0, x0), Math.max(0, y0), Math.min(width, x1) - Math.max(0, x0), Math.min(height, y1) - Math.max(0, y0));
-  }
-  overlays.drawBasemap(ctx, viewState, 'below');
-  // The image: straight onto the canvas, or onto its own layer to go over the basemap / be see-through.
   let target = ctx;
   if (layered) {
     imageLayer ??= document.createElement('canvas');
@@ -715,17 +901,54 @@ function draw(): void {
     target.setTransform(1, 0, 0, 1, 0, 0);
     target.clearRect(0, 0, width, height);
   }
-  for (const tile of shown) {
+  const warpedTransparent = !!grid && !grid.identity && hasTransparency(page);
+  // Warped: a coarser tile is not drawn at all where finer, final tiles cover it (in view).
+  // Clearing under them (below) leaves half a pixel of it along anti-aliased edges, which
+  // showed as a faint line along the image's outline.
+  const covered = (tile: DisplayTile): boolean => {
+    const x0 = Math.max(tile.window[0], visible[0]);
+    const y0 = Math.max(tile.window[1], visible[1]);
+    const x1 = Math.min(tile.window[2], visible[2]);
+    const y1 = Math.min(tile.window[3], visible[3]);
+    const need = (x1 - x0) * (y1 - y0);
+    if (need <= 0) return true;
+    const byLevel = new Map<number, number>();
+    for (const t of shown) {
+      if (t.z >= tile.z || !t.final || t.generation !== generation) continue;
+      const w = Math.min(t.window[2], x1) - Math.max(t.window[0], x0);
+      const h = Math.min(t.window[3], y1) - Math.max(t.window[1], y0);
+      if (w > 0 && h > 0) byLevel.set(t.z, (byLevel.get(t.z) ?? 0) + w * h);
+    }
+    return [...byLevel.values()].some((area) => area >= need - 1e-6);
+  };
+  // Warped cells overlap a little to hide seams; along the image's right and bottom
+  // edges that would draw thin lines just outside it: clip to its outline.
+  const warped = !!grid && !grid.identity;
+  if (warped) {
+    target.save();
+    outlinePath(target, grid!, view.scale, view.tx, view.ty, devicePixelRatio);
+    target.clip();
+  }
+  let groupKey = '';
+  for (const [index, tile] of shown.entries()) {
     tile.used = ++drawCounter;
+    if (warpedTransparent && covered(tile)) continue;
+    if (warpedTransparent && tile.final) {
+      const key = `${tile.generation}/${tile.z}`;
+      if (key !== groupKey) {
+        groupKey = key;
+        clearWarpedFootprints(target, shown.slice(index).filter((t) => t.final && `${t.generation}/${t.z}` === key));
+      }
+    }
     drawTile(target, page, tile, width, height, !layered);
   }
+  if (warped) target.restore();
   if (layered && imageLayer) {
-    ctx.globalAlpha = overlays.imageOpacity;
+    ctx.save();
+    ctx.globalAlpha = layers.imageOpacity;
     ctx.drawImage(imageLayer, 0, 0);
-    ctx.globalAlpha = 1;
+    ctx.restore();
   }
-  overlays.drawBasemap(ctx, viewState, 'above');
-  overlays.drawTop(ctx, viewState);
 }
 
 function hasTransparency(page: PageInfo): boolean {
@@ -746,7 +969,76 @@ function deviceRect(page: PageInfo, window: PixelWindow): [number, number, numbe
   ];
 }
 
+const TILE_MESH = 8;
+
+/** Where a tile goes in a warped grid: mesh points in grid pixels (kept until the grid changes). */
+function tileMesh(tile: DisplayTile): Float64Array {
+  if (tile.meshGrid !== grid && grid) {
+    const [wx0, wy0, wx1, wy1] = tile.window;
+    const mesh = new Float64Array((TILE_MESH + 1) * (TILE_MESH + 1) * 2);
+    let k = 0;
+    for (let j = 0; j <= TILE_MESH; j++) {
+      for (let i = 0; i <= TILE_MESH; i++) {
+        const [gx, gy] = grid.image.toCanvas(wx0 + ((wx1 - wx0) * i) / TILE_MESH, wy0 + ((wy1 - wy0) * j) / TILE_MESH);
+        mesh[k++] = gx;
+        mesh[k++] = gy;
+      }
+    }
+    tile.mesh = mesh;
+    tile.meshGrid = grid;
+  }
+  return tile.mesh!;
+}
+
+/**
+ * Clears where the final tiles of a group (same level and settings) go in a warped
+ * grid, in one fill: coarser tiles must not show through transparent pixels
+ * (NoData), and one fill leaves no seams where tiles meet.
+ */
+function clearWarpedFootprints(target: CanvasRenderingContext2D, group: DisplayTile[]): void {
+  const n = TILE_MESH + 1;
+  const k = view.scale * devicePixelRatio;
+  const ox = view.tx * devicePixelRatio;
+  const oy = view.ty * devicePixelRatio;
+  const border: number[] = [];
+  for (let i = 0; i < n; i++) border.push(i);
+  for (let j = 1; j < n; j++) border.push(j * n + n - 1);
+  for (let i = n - 2; i >= 0; i--) border.push((n - 1) * n + i);
+  for (let j = n - 2; j > 0; j--) border.push(j * n);
+  target.save();
+  target.setTransform(1, 0, 0, 1, 0, 0);
+  target.beginPath();
+  for (const tile of group) {
+    const mesh = tileMesh(tile);
+    border.forEach((p, i) => {
+      const x = mesh[2 * p] * k + ox;
+      const y = mesh[2 * p + 1] * k + oy;
+      if (i) target.lineTo(x, y);
+      else target.moveTo(x, y);
+    });
+    target.closePath();
+  }
+  target.globalCompositeOperation = 'destination-out';
+  target.fill('nonzero');
+  target.restore();
+}
+
 function drawTile(ctx: CanvasRenderingContext2D, page: PageInfo, tile: DisplayTile, width: number, height: number, checker: boolean): void {
+  if (grid && !grid.identity) {
+    // Warped into another coordinate system: a mesh of affine cells, like the basemap.
+    tileMesh(tile);
+    ctx.imageSmoothingEnabled = !(tile.z === 0 && view.scale * devicePixelRatio * grid.imageScale >= 1);
+    ctx.imageSmoothingQuality = 'high';
+    drawWarped(ctx, tile.bitmap, tile.bitmap.width, tile.bitmap.height, tile.mesh!, TILE_MESH, {
+      scale: view.scale,
+      tx: view.tx,
+      ty: view.ty,
+      dpr: devicePixelRatio,
+      width: stage.clientWidth,
+      height: stage.clientHeight,
+    });
+    return;
+  }
   const [x0, y0, x1, y1] = deviceRect(page, tile.window);
   // Clip to the canvas to keep coordinates small at high zoom.
   const cx0 = Math.max(0, x0);
@@ -808,10 +1100,9 @@ function showValue(page: PageInfo, v: number): string {
   return page.noData !== null && v === page.noData ? 'NoData' : formatNumber(v);
 }
 
-/** A composite's computed value, with its class label in paletted mode. */
-function showComputed(v: number): string {
+/** A composite's computed value, with its class label in paletted mode (the image's classes by default). */
+function showComputed(v: number, classes = composite?.classes): string {
   if (Number.isNaN(v)) return 'NoData';
-  const classes = composite?.classes;
   if (!classes) return formatNumber(v);
   const match = classes.find((c) => Math.fround(c.value) === Math.fround(v));
   return match ? `${formatNumber(v)}${match.label && match.label !== formatNumber(v) ? ` (${match.label})` : ''}` : `${formatNumber(v)} (no class)`;
@@ -822,28 +1113,14 @@ function computedLabels(computed: number[]): string[] {
   return computed.length === 3 ? ['R', 'G', 'B'] : [''];
 }
 
-const VALUE_SEPARATOR = '  |  ';
 
-function formatValues(values: number[] | null, computed?: number[]): string {
-  const page = currentPage();
-  if (!values || !page) {
-    return '';
-  }
-  let text =
-    values.length === 1
-      ? `${page.sampleLabels[0]}: ${showValue(page, values[0])}`
-      : values.map((v, i) => `${page.sampleLabels[i] ?? `S${i}`} ${showValue(page, v)}`).join(VALUE_SEPARATOR);
-  if (computed?.length) {
-    const labels = computedLabels(computed);
-    text = `${computed.map((v, i) => `${labels[i]}${labels[i] ? ' ' : ''}${showComputed(v)}`).join(VALUE_SEPARATOR)}   ←   ${text}`;
-  }
-  return text;
+/** Longitude and latitude of the centre of pixel (x, y) of a georeferenced raster; '' otherwise. */
+function formatLonLat(x: number, y: number, mapper = geoMapper): string {
+  if (!mapper) return '';
+  return lonLatText(...mapper.pixelToLonLat(x + 0.5, y + 0.5));
 }
 
-/** Longitude and latitude of the centre of pixel (x, y), for a georeferenced page; '' otherwise. */
-function formatLonLat(x: number, y: number): string {
-  if (!geoMapper) return '';
-  const [lon, lat] = geoMapper.pixelToLonLat(x + 0.5, y + 0.5);
+function lonLatText(lon: number, lat: number): string {
   // Six decimals: about 0.1 m.
   return Number.isFinite(lon) && Number.isFinite(lat) ? `lon ${lon.toFixed(6)}, lat ${lat.toFixed(6)}` : '';
 }
@@ -853,61 +1130,147 @@ function formatLonLat(x: number, y: number): string {
 const pixelTip = $<HTMLDivElement>('pixelTip');
 
 /** Shows the pixel readout: in the value table when it is on, otherwise in the status bar. */
+/** A raster's pixel under the pointer, with what it takes to show it. */
+interface RasterReadout {
+  x: number;
+  y: number;
+  values: number[] | null;
+  computed?: number[];
+  page: PageInfo;
+  classes: CompositeSpec['classes'];
+  mapper: GeoMapper | undefined;
+}
+
+/** The opened file's pixel under the pointer, if it is a layer and the pointer is over it. */
+function imageReadout(): RasterReadout | undefined {
+  const page = currentPage();
+  return page && shown && pixelReq !== 0 ? { ...shown, page, classes: composite?.classes, mapper: geoMapper } : undefined;
+}
+
+/** The pixel of the raster selected in the Layers panel (whose values the status bar shows). */
+function selectedReadout(): RasterReadout | undefined {
+  if (!target) return imageReadout();
+  const r = target.readout;
+  const page = target.page;
+  return r && page ? { ...r, page, classes: target.composite?.classes, mapper: page.geo ? new GeoMapper(page.geo) : undefined } : undefined;
+}
+
+/** Longitude / latitude of the pointer, from the canvas's grid. */
+function pointerLonLat(): string {
+  return pointerGrid && gridMapper ? lonLatText(...gridMapper.pixelToLonLat(pointerGrid[0], pointerGrid[1])) : '';
+}
+
+/**
+ * Shows the pixel readout: in the value table when it is on, otherwise in the
+ * status bar, for the raster selected in the Layers panel (its pixel and values)
+ * and the pointer's longitude / latitude.
+ */
 function renderReadout(): void {
-  if (!shown || pixelReq === 0) {
+  if (!pointerGrid) {
     statusPos.textContent = '';
-    statusValue.textContent = '';
     pixelTip.hidden = true;
     return;
   }
   if (tipOn) {
     statusPos.textContent = '';
-    statusValue.textContent = '';
   } else {
-    const lonLat = formatLonLat(shown.x, shown.y);
-    statusPos.textContent = lonLat ? `x ${shown.x}, y ${shown.y}  |  ${lonLat}` : `x ${shown.x}, y ${shown.y}`;
-    statusValue.textContent = formatValues(shown.values, shown.computed);
+    const r = selectedReadout();
+    const lonLat = r ? formatLonLat(r.x, r.y, r.mapper) : pointerLonLat();
+    statusPos.textContent = [r ? `x ${r.x}, y ${r.y}` : '', lonLat].filter(Boolean).join('  |  ');
   }
   updatePixelTip();
 }
 
-/** The band values of the pixel under the pointer, in a table next to it, while the table is on. */
+/**
+ * The value table next to the pointer, while it is on: one table per layer
+ * under the pointer, top layer first. Rasters show their pixel's band values
+ * (and the rendering's values), vector layers the attributes of the features
+ * under the pointer.
+ */
 function updatePixelTip(): void {
-  const page = currentPage();
-  const hovered = shown;
-  if (!tipOn || !pointer || pixelReq === 0 || !hovered?.values || !page) {
+  if (!tipOn || !pointer || !pointerGrid) {
     pixelTip.hidden = true;
     return;
   }
-  const row = (name: string, value: string, className?: string) => {
+  const row = (name: string, value: string) => {
     const tr = document.createElement('tr');
-    if (className) tr.className = className;
-    const th = Object.assign(document.createElement('th'), { scope: 'row', textContent: name });
-    tr.append(th, Object.assign(document.createElement('td'), { textContent: value }));
+    tr.append(Object.assign(document.createElement('th'), { scope: 'row', textContent: name }), Object.assign(document.createElement('td'), { textContent: value }));
     return tr;
   };
-  const caption = document.createElement('caption');
-  caption.append(`x ${hovered.x}, y ${hovered.y}`);
-  const lonLat = formatLonLat(hovered.x, hovered.y);
-  if (lonLat) caption.append(document.createElement('br'), lonLat);
-  const head = document.createElement('thead');
-  const headRow = document.createElement('tr');
-  headRow.append(Object.assign(document.createElement('th'), { scope: 'col', textContent: 'Band' }), Object.assign(document.createElement('th'), { scope: 'col', textContent: 'Value' }));
-  head.append(headRow);
-  const body = document.createElement('tbody');
-  // The band's name in the file (GDAL description, e.g. B04), else b1…bN.
-  hovered.values.forEach((v, i) => body.append(row(page.bandNames[i] || `b${i + 1}`, showValue(page, v))));
-  const table = document.createElement('table');
-  table.append(caption, head, body);
-  if (hovered.computed?.length) {
-    // The rendered composite's values, below the bands.
-    const result = document.createElement('tbody');
-    result.className = 'computed';
-    const labels = computedLabels(hovered.computed);
-    hovered.computed.forEach((v, i) => result.append(row(labels[i] ? `Rendered ${labels[i]}` : 'Rendered', showComputed(v))));
-    table.append(result);
+  const head = (first: string, second: string) => {
+    const thead = document.createElement('thead');
+    const tr = document.createElement('tr');
+    tr.append(Object.assign(document.createElement('th'), { scope: 'col', textContent: first }), Object.assign(document.createElement('th'), { scope: 'col', textContent: second }));
+    thead.append(tr);
+    return thead;
+  };
+  const table = (title: string, detail: string, ...sections: HTMLElement[]) => {
+    const t = document.createElement('table');
+    const caption = document.createElement('caption');
+    caption.append(Object.assign(document.createElement('strong'), { textContent: title }));
+    if (detail) caption.append(document.createElement('br'), detail);
+    t.append(caption, ...sections);
+    return t;
+  };
+  /** A raster's pixel: its bands, then the rendering's values. */
+  const rasterTable = (name: string, layerPage: PageInfo, readout: { x: number; y: number; values: number[] | null; computed?: number[] }, classes: CompositeSpec['classes']) => {
+    const body = document.createElement('tbody');
+    // The band's name in the file (GDAL description, e.g. B04), else b1…bN.
+    (readout.values ?? []).forEach((v, i) => body.append(row(layerPage.bandNames[i] || `b${i + 1}`, showValue(layerPage, v))));
+    const sections: HTMLElement[] = [head('Band', 'Value'), body];
+    if (readout.computed?.length) {
+      const result = document.createElement('tbody');
+      result.className = 'computed';
+      const labels = computedLabels(readout.computed);
+      readout.computed.forEach((v, i) => result.append(row(labels[i] ? `Rendered ${labels[i]}` : 'Rendered', showComputed(v, classes))));
+      sections.push(result);
+    }
+    return table(name, `x ${readout.x}, y ${readout.y}`, ...sections);
+  };
+  const tables: HTMLElement[] = [];
+  const identified = layers.identify(pointerGrid[0], pointerGrid[1], view.scale);
+  const several = identified.length > 1;
+  for (const item of identified) {
+    if (item.kind === 'image') {
+      const r = imageReadout();
+      if (r?.values) tables.push(rasterTable(item.name, r.page, r, r.classes));
+    } else if (item.kind === 'raster' && item.layer.readout && item.layer.page) {
+      tables.push(rasterTable(item.layer.name, item.layer.page, item.layer.readout, item.layer.composite?.classes));
+    } else if (item.kind === 'vector') {
+      item.features.forEach((properties, i) => {
+        const body = document.createElement('tbody');
+        const entries = Object.entries(properties ?? {});
+        for (const [key, value] of entries.slice(0, 40)) {
+          body.append(row(key, value === null || value === undefined ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)));
+        }
+        if (!entries.length) body.append(row('(no attributes)', ''));
+        if (entries.length > 40) body.append(row(`… ${entries.length - 40} more`, ''));
+        const count = item.features.length + item.more;
+        const detail = count > 1 ? `feature ${i + 1} of ${count}${i === item.features.length - 1 && item.more ? ` (${item.more} more not shown)` : ''}` : '';
+        tables.push(table(item.name, detail, head('Attribute', 'Value'), body));
+      });
+    }
   }
-  pixelTip.replaceChildren(table);
+  if (!tables.length) {
+    pixelTip.hidden = true;
+    return;
+  }
+  if (several) {
+    // Where the pointer is, then each layer's table (each names its own pixel).
+    const where = Object.assign(document.createElement('div'), { className: 'tip-where', textContent: pointerLonLat() });
+    pixelTip.replaceChildren(...(where.textContent ? [where] : []), ...tables);
+  } else {
+    // One layer: its pixel and longitude / latitude in the caption.
+    const only = tables[0];
+    const r = identified[0].kind === 'image' ? imageReadout() : identified[0].kind === 'raster' ? identified[0].layer.readout : undefined;
+    const caption = only.querySelector('caption');
+    if (caption && r) {
+      const mapper = identified[0].kind === 'raster' ? (identified[0].layer.page?.geo ? new GeoMapper(identified[0].layer.page.geo) : undefined) : geoMapper;
+      const lonLat = formatLonLat(r.x, r.y, mapper);
+      caption.replaceChildren(`x ${r.x}, y ${r.y}`, ...(lonLat ? [document.createElement('br'), lonLat] : []));
+    }
+    pixelTip.replaceChildren(only);
+  }
   pixelTip.hidden = false;
   placePixelTip();
 }
@@ -926,6 +1289,15 @@ function placePixelTip(): void {
   pixelTip.style.left = `${Math.max(4, left)}px`;
   pixelTip.style.top = `${Math.max(4, top)}px`;
 }
+
+/** The value table on hover (Space, or its button in the status bar). */
+function setTipOn(on: boolean): void {
+  tipOn = on;
+  valuesToggle.setAttribute('aria-pressed', String(on));
+  layers.readPixels(tipOn ? pointerGrid : undefined);
+  renderReadout();
+}
+valuesToggle.addEventListener('click', () => setTipOn(!tipOn));
 
 const TEXT_INPUTS = new Set(['text', 'number', 'search', 'url', 'email', 'password', 'tel']);
 
@@ -947,8 +1319,7 @@ window.addEventListener(
     event.preventDefault();
     event.stopPropagation();
     if (event.repeat) return;
-    tipOn = !tipOn;
-    renderReadout();
+    setTipOn(!tipOn);
   },
   { capture: true },
 );
@@ -992,9 +1363,13 @@ function formatBytes(bytes: number): string {
 const LONG_VALUE = 300;
 
 function renderInfo(): void {
-  const page = currentPage();
+  // The raster selected in the Layers panel (the opened file's, or another layer).
+  const page = targetPage();
+  const info = target ? target.info : imageInfo();
+  const fileName = targetName();
+  const pageIndex = target ? 0 : currentPageIndex();
   if (!info || !page) {
-    infoPanel.replaceChildren();
+    infoContent.replaceChildren();
     return;
   }
   const section = (title: string, rows: [string, string][]) => {
@@ -1046,7 +1421,7 @@ function renderInfo(): void {
   if (page.noData !== null) {
     pageRows.push(['NoData', String(page.noData)]);
   }
-  infoPanel.replaceChildren(
+  infoContent.replaceChildren(
     ...section('File', fileRows),
     ...section(info.pages.length > 1 ? `Page ${pageIndex + 1}` : 'Image', pageRows),
     ...(page.tags.length ? section('Summary', page.tags) : []),
@@ -1076,20 +1451,14 @@ stage.addEventListener(
   'wheel',
   (event) => {
     event.preventDefault();
+    // The wheel zooms around the pointer (panning is by dragging with the mouse).
     const lineScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1;
-    if (event.ctrlKey || event.metaKey) {
-      const [x, y] = stagePoint(event);
-      const delta = Math.max(-100, Math.min(100, event.deltaY * lineScale));
-      zoomTo(view.scale * Math.exp(-delta * 0.01), x, y);
-      // The pixel under the pointer may change: refresh the readout and the value table.
-      updatePointerReadout(event);
-    } else {
-      view.tx -= event.deltaX * lineScale;
-      view.ty -= event.deltaY * lineScale;
-      clampView();
-      draw();
-      scheduleTiles();
-    }
+    const [x, y] = stagePoint(event);
+    const delta = Math.max(-100, Math.min(100, (event.deltaY || event.deltaX) * lineScale));
+    if (!delta) return;
+    zoomTo(view.scale * Math.exp(-delta * 0.01), x, y);
+    // The pixel under the pointer may change: refresh the readout and the value table.
+    updatePointerReadout(event);
   },
   { passive: false },
 );
@@ -1137,6 +1506,8 @@ stage.addEventListener('pointerleave', () => {
   pixelReq = 0;
   requestedPixel = '';
   pointer = undefined;
+  pointerGrid = undefined;
+  layers.readPixels(undefined);
   renderReadout();
 });
 
@@ -1150,28 +1521,50 @@ stage.addEventListener('dblclick', (event) => {
 });
 
 function updatePointerReadout(event: MouseEvent): void {
-  const page = currentPage();
-  if (!page || page.unsupported) {
+  if (!grid) {
     return;
   }
   const [px, py] = stagePoint(event);
-  const x = Math.floor((px - view.tx) / view.scale);
-  const y = Math.floor((py - view.ty) / view.scale);
+  // Grid pixels, then each raster's pixel there.
+  const gx = (px - view.tx) / view.scale;
+  const gy = (py - view.ty) / view.scale;
   pointer = { x: event.clientX, y: event.clientY };
-  if (x < 0 || y < 0 || x >= page.width || y >= page.height) {
+  const [b0, b1, b2, b3] = grid.bounds;
+  if (!layers.unbounded && !(gx >= b0 && gy >= b1 && gx < b2 && gy < b3)) {
+    pixelReq = 0;
+    requestedPixel = '';
+    pointerGrid = undefined;
+    layers.readPixels(undefined);
+    renderReadout();
+    return;
+  }
+  pointerGrid = [gx, gy];
+  // The raster layers' pixels (for the status bar's selected raster, and the value table).
+  layers.readPixels(pointerGrid);
+  placePixelTip();
+  // The opened file's pixel, while it is a layer.
+  const page = currentPage();
+  if (!page || page.unsupported) {
+    renderReadout();
+    return;
+  }
+  const [ix, iy] = grid.identity ? [gx, gy] : grid.image.toSource(gx, gy);
+  const x = Math.floor(ix);
+  const y = Math.floor(iy);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= page.width || y >= page.height) {
     pixelReq = 0;
     requestedPixel = '';
     renderReadout();
     return;
   }
-  placePixelTip();
   // One request per pixel (and rendering): moving within a pixel asks nothing new.
   const key = `${pageIndex}:${x}:${y}`;
-  if (key === requestedPixel && composite === requestedComposite && pixelReq !== 0) return;
+  if (key === requestedPixel && composite === requestedComposite && pixelReq !== 0) return renderReadout();
   requestedPixel = key;
   requestedComposite = composite;
   pixelReq = ++requestCounter;
   postToWorker({ type: 'pixel', reqId: pixelReq, page: pageIndex, x, y, composite });
+  renderReadout();
 }
 
 document.addEventListener('keydown', (event) => {
@@ -1203,12 +1596,6 @@ document.addEventListener('keydown', (event) => {
     case '[':
       changePage(-1);
       break;
-    case 'g':
-    case 'G':
-      // Coordinates & scale, for georeferenced images.
-      if (mod || !overlays.available) handled = false;
-      else overlays.toggleTicks();
-      break;
     case 'ArrowLeft':
     case 'ArrowRight':
     case 'ArrowUp':
@@ -1221,6 +1608,18 @@ document.addEventListener('keydown', (event) => {
       scheduleTiles();
       break;
     }
+    case 'u':
+    case 'U':
+      // Unbounded view, for georeferenced layers.
+      if (mod || !layers.available || !grid?.geo) handled = false;
+      else layers.toggleUnbounded();
+      break;
+    case 'g':
+    case 'G':
+      // Coordinates & scale, for georeferenced images.
+      if (mod || !layers.available) handled = false;
+      else layers.toggleTicks();
+      break;
     default:
       handled = false;
   }
@@ -1244,6 +1643,53 @@ $('zoomOut').addEventListener('click', () => zoomTo(view.scale / ZOOM_STEP));
 $('fit').addEventListener('click', () => setFit('fit'));
 $('actual').addEventListener('click', () => zoomTo(1));
 infoToggle.addEventListener('click', toggleInfo);
+
+// Each open side panel's left border can be dragged to resize it (double-click: default width).
+for (const resizer of document.querySelectorAll<HTMLDivElement>('.panel-resizer')) {
+  const panel = $<HTMLElement>(resizer.dataset.panel!);
+  let start: { x: number; width: number; id: number } | undefined;
+  resizer.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    start = { x: event.clientX, width: panel.getBoundingClientRect().width, id: event.pointerId };
+    resizer.setPointerCapture(event.pointerId);
+    resizer.classList.add('dragging');
+  });
+  resizer.addEventListener('pointermove', (event) => {
+    if (!start || start.id !== event.pointerId) return;
+    // Wider to the left; at least 220 px, and at least 200 px left for the image.
+    const others = [...document.querySelectorAll<HTMLElement>('#main > aside')]
+      .filter((p) => p !== panel && !p.hidden)
+      .reduce((sum, p) => sum + p.getBoundingClientRect().width, 0);
+    const max = Math.max(220, window.innerWidth - others - 200);
+    const width = Math.min(max, Math.max(220, start.width + start.x - event.clientX));
+    panel.style.width = `${Math.round(width)}px`;
+    panel.style.maxWidth = 'none';
+  });
+  const end = (event: PointerEvent) => {
+    if (!start || start.id !== event.pointerId) return;
+    start = undefined;
+    resizer.classList.remove('dragging');
+  };
+  resizer.addEventListener('pointerup', end);
+  resizer.addEventListener('pointercancel', end);
+  resizer.addEventListener('dblclick', () => {
+    panel.style.width = '';
+    panel.style.maxWidth = '';
+  });
+  // The size lasts while the viewer is open (closing and reopening the panel keeps it);
+  // it is not saved, so a new viewer starts with the default widths.
+}
+
+// The × at the top right of each side panel closes it (as its toolbar button does).
+for (const button of document.querySelectorAll<HTMLButtonElement>('.panel-close')) {
+  button.addEventListener('click', () => {
+    const panel = button.closest('aside')!;
+    if (panel.id === 'composite') return showComposite(false);
+    panel.hidden = true;
+    $(button.dataset.toggle!).setAttribute('aria-pressed', 'false');
+  });
+}
 pageSelect.addEventListener('change', () => selectPage(Number(pageSelect.value)));
 
 new ResizeObserver(() => layout()).observe(stage);
@@ -1318,16 +1764,250 @@ for (const name of COLORMAP_NAMES) {
   }
 }
 
+// --- Which raster the panel edits: the opened image, or a raster layer (Layers panel) ---
+
+/** The selected raster layer; undefined: the opened image. */
+let target: RasterLayer | undefined;
+const renderingLayer = $<HTMLSelectElement>('renderingLayer');
+const rasterView = $<HTMLDivElement>('rasterRendering');
+const vectorView = $<HTMLDivElement>('vectorRendering');
+/** The vector layer shown in the Rendering panel (its vector view), if one is. */
+let vectorChoice: number | undefined;
+/** The basemap shown in the Rendering panel (its basemap view), if one is. */
+let basemapChoice: number | undefined;
+const basemapView = $<HTMLDivElement>('basemapRendering');
+
+/** Everything the panel holds for one raster, kept while another one is edited. */
+interface RenderState {
+  selection: Selection;
+  editing: Preset;
+  modeStates: Partial<Record<Mode, PanelState>>;
+  currentMode: Mode;
+  panelFilled: boolean;
+  panel?: PanelState;
+}
+/** The opened image's state while a layer is edited. */
+let imageRenderState: RenderState | undefined;
+
+function targetPage(): PageInfo | undefined {
+  return target ? target.page : currentPage();
+}
+
+function targetName(): string {
+  return target ? target.name : fileName;
+}
+
+function postToTarget(message: MainToWorker): void {
+  if (target) target.post(message);
+  else postToWorker(message);
+}
+
+function saveRenderState(): RenderState {
+  return { selection, editing, modeStates: { ...modeStates }, currentMode, panelFilled, panel: panelFilled ? captureState() : undefined };
+}
+
+function loadRenderState(state: RenderState | undefined, page: PageInfo, name: string): void {
+  for (const key of Object.keys(modeStates) as Mode[]) delete modeStates[key];
+  if (!state || !state.panelFilled || !state.panel) {
+    // A raster not edited yet: its own starting point (a matching preset, or its colours).
+    panelFilled = false;
+    applySelection(state?.selection ?? initialSelection(page, name, false), false);
+    return;
+  }
+  Object.assign(modeStates, state.modeStates);
+  selection = state.selection;
+  editing = state.editing;
+  setMode(state.currentMode);
+  restoreState(state.panel);
+  renderVariables(editing.variables);
+  panelFilled = true;
+  updatePresetSelect();
+  renderBandList();
+  showCompositeError(undefined);
+}
+
+/** Makes the panel (and its Preset menu) edit `layer`, or the opened image. */
+function selectTarget(layer: RasterLayer | undefined): void {
+  if (layer === target) return;
+  if (classifyRequest) {
+    postToTarget({ type: 'cancelClassify', reqId: classifyRequest });
+    endClassify();
+  }
+  clearTimeout(editTimer);
+  const state = saveRenderState();
+  if (target) target.renderState = state;
+  else imageRenderState = state;
+  target = layer;
+  layers.markSelected(layer);
+  const page = targetPage();
+  updateRenderingTarget();
+  renderReadout();
+  if (!page) return;
+  loadRenderState(layer ? (layer.renderState as RenderState | undefined) : imageRenderState, page, targetName());
+  if (!layer) imageRenderState = undefined;
+}
+
+function choiceValue(choice: LayerChoice): string {
+  return choice.kind === 'image' ? 'image' : choice.kind === 'raster' ? `raster:${choice.layer.id}` : `${choice.kind}:${choice.id}`;
+}
+
+/**
+ * The Rendering panel's layer menu (every layer, top first) and its view: the
+ * raster view for the selected raster, or the vector view for a vector layer.
+ * The Preset menu, the Info panel and the status bar follow the selected raster.
+ */
+function updateRenderingTarget(): void {
+  const choices = layers.layerChoices();
+  if (vectorChoice !== undefined && !choices.some((c) => c.kind === 'vector' && c.id === vectorChoice)) vectorChoice = undefined;
+  if (basemapChoice !== undefined && !choices.some((c) => c.kind === 'basemap' && c.id === basemapChoice)) basemapChoice = undefined;
+  const page = targetPage();
+  const rasters = choices.filter((c) => c.kind === 'image' || c.kind === 'raster');
+  renderingLayer.replaceChildren(
+    ...choices.map((c) => Object.assign(document.createElement('option'), { value: choiceValue(c), textContent: c.kind === 'raster' ? c.layer.name : c.name })),
+  );
+  renderingLayer.value =
+    vectorChoice !== undefined ? `vector:${vectorChoice}` : basemapChoice !== undefined ? `basemap:${basemapChoice}` : target ? `raster:${target.id}` : page ? 'image' : '';
+  const vector = vectorChoice !== undefined;
+  const basemap = basemapChoice !== undefined;
+  layers.markShown(vector ? { kind: 'vector', id: vectorChoice! } : basemap ? { kind: 'basemap', id: basemapChoice! } : undefined);
+  rasterView.hidden = vector || basemap || !page || !!page.unsupported;
+  vectorView.hidden = !vector;
+  basemapView.hidden = !basemap;
+  if (vector) fillVectorView();
+  if (basemap) fillBasemapView();
+  presetGroup.title = target ? `Rendering preset of ${target.name}` : 'Rendering preset';
+  // Presets are rasters' (the raster view only).
+  presetGroup.hidden = !page || !!page.unsupported || vector || basemap;
+  compositeToggle.hidden = !choices.length || (choices.length === rasters.length && (!page || !!page.unsupported));
+  if (compositeToggle.hidden) showComposite(false);
+  statusSize.textContent = page ? `${page.width} × ${page.height}` : '';
+  renderInfo();
+}
+
+function fillVectorView(): void {
+  const style = vectorChoice !== undefined ? layers.vectorStyle(vectorChoice) : undefined;
+  if (!style) return;
+  $<HTMLInputElement>('vectorColor').value = style.color;
+  $<HTMLInputElement>('vectorWidth').value = String(style.width);
+  $<HTMLInputElement>('vectorFill').value = String(Math.round(style.fill * 100));
+  $<HTMLInputElement>('vectorFillValue').value = String(Math.round(style.fill * 100));
+  $('vectorInfo').textContent = style.summary;
+}
+
+/** The basemap view: its name, and its language and region where the provider has them. */
+function fillBasemapView(): void {
+  const info = basemapChoice !== undefined ? layers.basemapInfo(basemapChoice) : undefined;
+  if (!info) return;
+  $('basemapInfo').textContent = info.attribution;
+  $('basemapLanguageRow').hidden = !info.language;
+  $('basemapRegionRow').hidden = !info.region;
+  $('basemapNoLocalization').hidden = info.language || info.region;
+  $<HTMLSelectElement>('basemapLanguage').value = info.localization.language;
+  $<HTMLSelectElement>('basemapRegion').value = info.localization.region;
+}
+
+{
+  const option = (value: string, text: string) => Object.assign(document.createElement('option'), { value, textContent: text });
+  $('basemapLanguage').append(option('', 'Default'), ...LANGUAGES.map(([code, name]) => option(code, name)));
+  $('basemapRegion').append(option('', 'Default'), ...REGIONS.map(([code, name]) => option(code, name)));
+  for (const [id, key] of [['basemapLanguage', 'language'], ['basemapRegion', 'region']] as const) {
+    $(id).addEventListener('change', (e) => {
+      if (basemapChoice !== undefined) layers.setBasemapLocalization(basemapChoice, { [key]: (e.target as HTMLSelectElement).value });
+    });
+  }
+}
+
+/** Opens the Rendering panel on a basemap (its basemap view). */
+function openBasemapRendering(id: number, open = true): void {
+  vectorChoice = undefined;
+  basemapChoice = id;
+  updateRenderingTarget();
+  if (open) showComposite(true);
+}
+
+/** Opens the Rendering panel on a vector layer (its vector view). */
+function openVectorRendering(id: number, open = true): void {
+  basemapChoice = undefined;
+  vectorChoice = id;
+  updateRenderingTarget();
+  if (open) showComposite(true);
+}
+
+/** Opens the Rendering panel on a raster (undefined: the opened file's). */
+function openRendering(layer: RasterLayer | undefined, open = true): void {
+  vectorChoice = undefined;
+  basemapChoice = undefined;
+  selectTarget(layer);
+  updateRenderingTarget();
+  if (open) showComposite(true);
+}
+
+renderingLayer.addEventListener('change', () => {
+  const value = renderingLayer.value;
+  if (value.startsWith('vector:')) return openVectorRendering(Number(value.slice(7)));
+  if (value.startsWith('basemap:')) return openBasemapRendering(Number(value.slice(8)));
+  const layer = value.startsWith('raster:') ? layers.rasters().find((l) => l.id === Number(value.slice(7))) : undefined;
+  openRendering(layer);
+});
+$('vectorColor').addEventListener('input', (e) => vectorChoice !== undefined && layers.setVectorStyle(vectorChoice, { color: (e.target as HTMLInputElement).value }));
+$('vectorWidth').addEventListener('input', (e) => {
+  const v = Number((e.target as HTMLInputElement).value);
+  if (vectorChoice !== undefined && Number.isFinite(v) && v > 0) layers.setVectorStyle(vectorChoice, { width: Math.min(20, v) });
+});
+for (const [id, other] of [['vectorFill', 'vectorFillValue'], ['vectorFillValue', 'vectorFill']]) {
+  $(id).addEventListener('input', (e) => {
+    const v = Number((e.target as HTMLInputElement).value);
+    if (vectorChoice === undefined || !Number.isFinite(v)) return;
+    const clamped = Math.min(100, Math.max(0, v));
+    $<HTMLInputElement>(other).value = String(clamped);
+    layers.setVectorStyle(vectorChoice, { fill: clamped / 100 });
+  });
+}
+// Double-click the fill slider: back to the default (25%).
+$('vectorFill').addEventListener('dblclick', () => {
+  $<HTMLInputElement>('vectorFill').value = '25';
+  $('vectorFill').dispatchEvent(new Event('input'));
+});
+
+/** A raster layer was added: render it with a matching preset (or its colours), and edit it. */
+function rasterAdded(layer: RasterLayer): void {
+  const page = layer.page!;
+  const initial = initialSelection(page, layer.name, false);
+  layer.renderState = { selection: initial, editing: { name: '' }, modeStates: {}, currentMode: 'rgb', panelFilled: false } satisfies RenderState;
+  layer.setComposite(compositeFor(initial, page));
+  selectTarget(layer);
+}
+
+function rasterRemoved(layer: RasterLayer): void {
+  if (target !== layer) return;
+  // The next raster takes its place in the panel (the opened file's, or the top one).
+  const choices = layers.rasterChoices();
+  const next = choices.find((c) => c.kind === 'image') ?? choices[0];
+  selectTarget(next?.kind === 'raster' ? next.layer : undefined);
+  if (!next) target = undefined;
+}
+
+/** Presets changed: re-resolve the rasters not in the panel (the panel's is re-applied by the caller). */
+function refreshOtherRenderings(): void {
+  const image = currentPage();
+  if (target && image && imageRenderState) setImageComposite(compositeFor(imageRenderState.selection, image));
+  for (const layer of layers.rasters()) {
+    if (layer === target || !layer.page) continue;
+    const state = layer.renderState as RenderState | undefined;
+    if (state) layer.setComposite(compositeFor(state.selection, layer.page));
+  }
+}
+
 function findPreset(name: string): Preset | undefined {
   return userPresets.find((p) => p.name === name);
 }
 
-function initialSelection(page: PageInfo): Selection {
+function initialSelection(page: PageInfo, name: string, useRemembered = true): Selection {
   // Unsaved composites last only while the image is open; presets and the plain image are remembered.
-  if (remembered?.kind === 'none' || (remembered?.kind === 'preset' && findPreset(remembered.name))) {
+  if (useRemembered && (remembered?.kind === 'none' || (remembered?.kind === 'preset' && findPreset(remembered.name)))) {
     return remembered;
   }
-  const match = userPresets.find((p) => presetMatches(p, fileName, page.samplesPerPixel));
+  const match = userPresets.find((p) => presetMatches(p, name, page.samplesPerPixel));
   return match ? { kind: 'preset', name: match.name } : { kind: 'none' };
 }
 
@@ -1344,7 +2024,7 @@ function defaultPreset(page: PageInfo): Preset {
 
 /** Shows `next` (a preset, an unsaved composite or the plain image) and fills the editor with it. */
 function applySelection(next: Selection, remember: boolean): void {
-  const page = currentPage();
+  const page = targetPage();
   if (!page) return;
   let preset: Preset | undefined;
   if (next.kind === 'preset') {
@@ -1360,7 +2040,8 @@ function applySelection(next: Selection, remember: boolean): void {
     fillEditor();
   }
   updatePresetSelect();
-  if (remember) {
+  // What is shown is remembered for the opened image (by the extension host), not for added layers.
+  if (remember && !target) {
     vscode.postMessage({ type: 'remember', selection });
   }
   if (!preset) {
@@ -1373,7 +2054,7 @@ function applySelection(next: Selection, remember: boolean): void {
   if (error) {
     // Show the plain image, and why the preset does not apply.
     setComposite(undefined);
-    showCompositeError(error.message, error.index);
+    showCompositeError(error.message, error.index, variableField(error.variable));
     showComposite(true);
   } else {
     showCompositeError(undefined);
@@ -1381,7 +2062,7 @@ function applySelection(next: Selection, remember: boolean): void {
   }
 }
 
-function validate(spec: CompositeSpec): { message: string; index?: number } | undefined {
+function validate(spec: CompositeSpec): { message: string; index?: number; variable?: string } | undefined {
   try {
     compileExpressions(spec.expressions, spec.bands, spec.variables);
     return undefined;
@@ -1389,15 +2070,29 @@ function validate(spec: CompositeSpec): { message: string; index?: number } | un
     const { index, variable } = error as ExpressionError;
     const where =
       variable !== undefined
-        ? `Variable '${variable}' (in the presets file): `
+        ? `Variable '${variable}': `
         : spec.expressions.length === 3 && index !== undefined
           ? `${['Red', 'Green', 'Blue'][index]}: `
           : '';
-    return { message: where + (error instanceof ExpressionError ? error.message : String(error)), index };
+    return { message: where + (error instanceof ExpressionError ? error.message : String(error)), index, variable };
   }
 }
 
+/** Renders the raster the panel edits (the opened image, or the selected layer) with `spec`. */
 function setComposite(spec: CompositeSpec | undefined): void {
+  if (target) target.setComposite(spec);
+  else setImageComposite(spec);
+}
+
+/** The composite a selection gives on `page`, or undefined (the plain image, or one that does not apply). */
+function compositeFor(selected: Selection, page: PageInfo): CompositeSpec | undefined {
+  const preset = selected.kind === 'preset' ? findPreset(selected.name) : selected.kind === 'custom' ? selected.preset : undefined;
+  if (!preset) return undefined;
+  const spec = compositeSpec(preset, page.samplesPerPixel, page.bandNames);
+  return validate(spec) ? undefined : spec;
+}
+
+function setImageComposite(spec: CompositeSpec | undefined): void {
   if (JSON.stringify(spec ?? null) === JSON.stringify(composite ?? null)) {
     return;
   }
@@ -1469,6 +2164,7 @@ function fillEditor(): void {
   updateAutoRows();
   colormapSelect.value = COLORMAP_NAMES.includes((editing.colormap ?? 'gray').replace(/_r$/, '')) ? (editing.colormap ?? 'gray') : 'gray';
   for (const name of ADJUSTMENT_NAMES) setAdjustment(name, presetAdjustment(editing, name));
+  renderVariables(editing.variables);
   panelFilled = true;
   renderBandList();
 }
@@ -1539,7 +2235,7 @@ function buildRows(mode: Mode): void {
         ? [['V', '', 'Band (or expression) whose values are listed']]
         : [['V', '', 'Value']];
   channelsBox.querySelectorAll('.row-cell').forEach((cell) => cell.remove());
-  const fullAvailable = currentPage()?.sampleFormat !== 'Floating point';
+  const fullAvailable = targetPage()?.sampleFormat !== 'Floating point';
   rows = labels.map(([short, cls, long]) => {
     const label = document.createElement('span');
     label.className = `row-cell channel-label ${cls}`;
@@ -1670,8 +2366,9 @@ $('resetAdjustments').addEventListener('click', () => {
 function readEditor(): { preset: Preset } | { error: string; field?: HTMLInputElement } {
   const preset: Preset = { name: editing.name };
   if (editing.bands) preset.bands = editing.bands;
-  // Variables are edited in the presets file; keep them.
-  if (editing.variables) preset.variables = editing.variables;
+  const variables = readVariables();
+  if ('error' in variables) return variables;
+  if (variables.variables) preset.variables = variables.variables;
   if (editing.match) preset.match = editing.match;
   const expressions = rows.map((row) => row.expression.value.trim());
   if (currentMode === 'rgb') {
@@ -1717,23 +2414,13 @@ function readEditor(): { preset: Preset } | { error: string; field?: HTMLInputEl
 }
 
 function renderBandList(): void {
-  const page = currentPage();
+  const page = targetPage();
   if (!page) return;
   const vars = bandVariables(page.samplesPerPixel, page.bandNames, editing.bands);
   const names: string[][] = Array.from({ length: page.samplesPerPixel }, () => []);
   for (const [name, index] of Object.entries(vars)) names[index].push(name);
-  const variableButtons = Object.entries(editing.variables ?? {}).map(([name, source]) => {
-    const button = document.createElement('button');
-    const tag = document.createElement('span');
-    tag.className = 'index';
-    tag.textContent = 'var';
-    button.append(tag, name);
-    button.title = `Variable defined in the preset: ${name} = ${source}`;
-    button.addEventListener('click', () => insertBand(name));
-    return button;
-  });
+  // The layer's own bands only (variables have their section).
   bandList.replaceChildren(
-    ...variableButtons,
     ...names.map((list, i) => {
       // Prefer the file's name for the band (B04, VV), then a preset's, then b4.
       const described = page.bandNames[i] ? list.find((n) => vars[n] === i && n !== `b${i + 1}` && n === bandIdentifierOf(page.bandNames[i]!)) : undefined;
@@ -1749,6 +2436,117 @@ function renderBandList(): void {
     }),
   );
 }
+
+// --- Variables: named expressions, computed in order (each can use the ones above it) ---
+
+const variableList = $<HTMLDivElement>('variableList');
+const VARIABLE_DRAG = 'application/x-tiff-viewer-variable';
+
+interface VariableRow {
+  row: HTMLDivElement;
+  name: HTMLInputElement;
+  expression: HTMLInputElement;
+}
+
+let variableRows: VariableRow[] = [];
+let draggedVariable: VariableRow | undefined;
+
+/** Fills the Variables section (in order). */
+function renderVariables(variables: Record<string, string> | undefined): void {
+  variableRows = [];
+  variableList.replaceChildren();
+  for (const [name, source] of Object.entries(variables ?? {})) addVariableRow(name, String(source));
+}
+
+function addVariableRow(nameValue: string, source: string): VariableRow {
+  const row = document.createElement('div');
+  row.className = 'variable-row';
+  const handle = Object.assign(document.createElement('span'), { className: 'layer-handle', textContent: '⠿', title: 'Drag to change the order (a variable can use the ones above it)' });
+  const name = Object.assign(document.createElement('input'), { type: 'text', className: 'variable-name', value: nameValue, placeholder: 'name', spellcheck: false, title: 'Name (letters, digits and _)' });
+  name.setAttribute('aria-label', 'Variable name');
+  const equals = Object.assign(document.createElement('span'), { className: 'hint', textContent: '=' });
+  const expression = Object.assign(document.createElement('input'), { type: 'text', className: 'variable-expression', value: source, placeholder: 'e.g. B08 - B04', spellcheck: false, title: 'Expression' });
+  expression.setAttribute('aria-label', `Expression of ${nameValue || 'the variable'}`);
+  const insert = Object.assign(document.createElement('button'), { textContent: '↵', title: 'Insert this variable into the expression being edited' });
+  const remove = Object.assign(document.createElement('button'), { textContent: '×', title: 'Remove the variable' });
+  row.append(handle, name, equals, expression, insert, remove);
+  const entry: VariableRow = { row, name, expression };
+  for (const field of [name, expression]) field.addEventListener('input', () => onEdit());
+  // Bands (and variables) clicked go into the variable's expression when it was edited last.
+  expression.addEventListener('focus', () => (lastExpression = expression));
+  insert.addEventListener('click', () => name.value.trim() && insertBand(name.value.trim()));
+  remove.addEventListener('click', () => {
+    variableRows = variableRows.filter((r) => r !== entry);
+    row.remove();
+    if (lastExpression === expression) lastExpression = rows[0]?.expression;
+    onEdit(0);
+  });
+  // Drag by the handle to reorder.
+  handle.addEventListener('pointerdown', () => (row.draggable = true));
+  row.addEventListener('dragstart', (e) => {
+    draggedVariable = entry;
+    e.dataTransfer?.setData(VARIABLE_DRAG, name.value);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+    row.classList.add('dragging');
+  });
+  row.addEventListener('dragend', () => {
+    row.draggable = false;
+    draggedVariable = undefined;
+    row.classList.remove('dragging');
+    variableList.querySelectorAll('.drop-above, .drop-below').forEach((el) => el.classList.remove('drop-above', 'drop-below'));
+  });
+  row.addEventListener('dragover', (e) => {
+    if (!draggedVariable || draggedVariable === entry) return;
+    e.preventDefault();
+    const r = row.getBoundingClientRect();
+    const above = e.clientY < r.top + r.height / 2;
+    row.classList.toggle('drop-above', above);
+    row.classList.toggle('drop-below', !above);
+  });
+  row.addEventListener('dragleave', () => row.classList.remove('drop-above', 'drop-below'));
+  row.addEventListener('drop', (e) => {
+    const moved = draggedVariable;
+    if (!moved || moved === entry) return;
+    e.preventDefault();
+    const r = row.getBoundingClientRect();
+    const above = e.clientY < r.top + r.height / 2;
+    variableRows = variableRows.filter((v) => v !== moved);
+    variableRows.splice(variableRows.indexOf(entry) + (above ? 0 : 1), 0, moved);
+    variableList.replaceChildren(...variableRows.map((v) => v.row));
+    onEdit(0);
+  });
+  variableRows.push(entry);
+  variableList.append(row);
+  return entry;
+}
+
+/** A variable's expression field, to mark it when the variable is wrong. */
+function variableField(name: string | undefined): HTMLInputElement | undefined {
+  return name === undefined ? undefined : variableRows.find((v) => v.name.value.trim() === name)?.expression;
+}
+
+/** The variables as typed, in order; rows left empty are ignored. */
+function readVariables(): { variables?: Record<string, string> } | { error: string; field?: HTMLInputElement } {
+  const variables: Record<string, string> = {};
+  for (const { name, expression } of variableRows) {
+    const n = name.value.trim();
+    const e = expression.value.trim();
+    if (!n && !e) continue;
+    if (!n) return { error: 'Give the variable a name.', field: name };
+    if (!e) return { error: `Give the variable '${n}' an expression.`, field: expression };
+    if (n in variables) return { error: `There are two variables named '${n}'.`, field: name };
+    variables[n] = e;
+  }
+  return Object.keys(variables).length ? { variables } : {};
+}
+
+$('variableAdd').addEventListener('click', () => {
+  const used = new Set(variableRows.map((v) => v.name.value.trim()));
+  let i = 1;
+  while (used.has(`v${i}`)) i++;
+  const entry = addVariableRow(`v${i}`, '');
+  entry.expression.focus();
+});
 
 function insertBand(name: string): void {
   const input = lastExpression ?? rows[0]?.expression;
@@ -1964,8 +2762,8 @@ $('paletteDeleteAll').addEventListener('click', () => {
 paletteMore.addEventListener('click', () => {
   paletteMenu.hidden = !paletteMenu.hidden;
   paletteMore.setAttribute('aria-expanded', String(!paletteMenu.hidden));
-  ($('paletteLoadLayer') as HTMLButtonElement).disabled = !currentPage()?.palette;
-  $('paletteLoadLayer').title = currentPage()?.palette ? "Use the image's own colour table" : 'This image has no colour table';
+  ($('paletteLoadLayer') as HTMLButtonElement).disabled = !targetPage()?.palette;
+  $('paletteLoadLayer').title = targetPage()?.palette ? "Use the image's own colour table" : 'This image has no colour table';
 });
 const closeMenu = () => {
   paletteMenu.hidden = true;
@@ -1973,7 +2771,7 @@ const closeMenu = () => {
 };
 $('paletteLoadLayer').addEventListener('click', () => {
   closeMenu();
-  const palette = currentPage()?.palette;
+  const palette = targetPage()?.palette;
   if (!palette) return;
   ({ rows: paletteRows, note: paletteNoteText } = limitClasses(layerClasses(palette), "The image's colour table"));
   paletteSelection.clear();
@@ -1985,7 +2783,7 @@ $('paletteLoadFile').addEventListener('click', () => {
 });
 $('paletteExport').addEventListener('click', () => {
   closeMenu();
-  const base = fileName.replace(/\.[^.]*$/, '') || 'colormap';
+  const base = targetName().replace(/\.[^.]*$/, '') || 'colormap';
   vscode.postMessage({ type: 'exportColorMap', text: colorMapToString(paletteRows.map((r) => ({ value: r.value, color: r.rgba, label: r.label }))), fileName: `${base}.clr` });
 });
 
@@ -2018,14 +2816,19 @@ function onColorMapLoaded(text: string, file: string): void {
 // Classify: the band's unique values, keeping the colours and labels of values already listed (as QGIS).
 paletteClassify.addEventListener('click', () => {
   if (classifyRequest) {
-    postToWorker({ type: 'cancelClassify', reqId: classifyRequest });
+    postToTarget({ type: 'cancelClassify', reqId: classifyRequest });
     endClassify();
     return;
   }
-  const page = currentPage();
+  const page = targetPage();
   const expression = rows[0]?.expression.value.trim() ?? '';
   if (!page || !expression) return;
-  const spec = compositeSpec({ name: '', value: expression, variables: editing.variables, bands: editing.bands }, page.samplesPerPixel, page.bandNames);
+  const typed = readVariables();
+  if ('error' in typed) {
+    showCompositeError(typed.error, undefined, typed.field);
+    return;
+  }
+  const spec = compositeSpec({ name: '', value: expression, variables: typed.variables, bands: editing.bands }, page.samplesPerPixel, page.bandNames);
   const error = validate(spec);
   if (error) {
     showCompositeError(error.message, 0);
@@ -2035,8 +2838,26 @@ paletteClassify.addEventListener('click', () => {
   paletteClassify.textContent = 'Cancel';
   paletteClassify.title = 'Stop collecting values';
   paletteNote.textContent = 'Collecting values… 0%';
-  postToWorker({ type: 'classify', reqId: classifyRequest, page: pageIndex, composite: spec });
+  postToTarget({ type: 'classify', reqId: classifyRequest, page: target ? 0 : pageIndex, composite: spec });
 });
+
+/** Classify progress and results from the worker of the raster the panel edits. */
+function onClassifyMessage(message: WorkerToMain): void {
+  switch (message.type) {
+    case 'classifyProgress':
+      if (message.reqId === classifyRequest) paletteNote.textContent = `Collecting values… ${Math.floor(message.fraction * 100)}%`;
+      break;
+    case 'classified':
+      if (message.reqId === classifyRequest) onClassified(message.values, message.truncated);
+      break;
+    case 'classifyError':
+      if (message.reqId === classifyRequest) {
+        endClassify();
+        showCompositeError(message.message);
+      }
+      break;
+  }
+}
 
 function endClassify(): void {
   classifyRequest = 0;
@@ -2072,7 +2893,7 @@ function showCompositeError(message: string | undefined, index?: number, field?:
 function onEdit(delay = 300): void {
   clearTimeout(editTimer);
   editTimer = setTimeout(() => {
-    const page = currentPage();
+    const page = targetPage();
     if (!page) return;
     const result = readEditor();
     if ('error' in result) {
@@ -2082,7 +2903,7 @@ function onEdit(delay = 300): void {
     const spec = compositeSpec(result.preset, page.samplesPerPixel, page.bandNames);
     const error = validate(spec);
     if (error) {
-      showCompositeError(error.message, error.index);
+      showCompositeError(error.message, error.index, variableField(error.variable));
       return;
     }
     showCompositeError(undefined);
@@ -2112,7 +2933,7 @@ presetSelect.addEventListener('change', () => {
 for (const radio of compositePanel.querySelectorAll<HTMLInputElement>('input[name="mode"]')) {
   radio.addEventListener('change', () => {
     // Each mode keeps its own panel while the image is open: switching back restores it.
-    const page = currentPage();
+    const page = targetPage();
     const next = checkedMode();
     if (!page || next === currentMode) return;
     modeStates[currentMode] = captureState();
@@ -2124,17 +2945,17 @@ for (const radio of compositePanel.querySelectorAll<HTMLInputElement>('input[nam
 colormapSelect.addEventListener('change', () => onEdit(0));
 $('saveComposite').addEventListener('click', () => {
   const result = readEditor();
-  const page = currentPage();
+  const page = targetPage();
   if ('error' in result || !page) {
     if ('error' in result) showCompositeError(result.error, undefined, result.field);
     return;
   }
   const error = validate(compositeSpec(result.preset, page.samplesPerPixel, page.bandNames));
   if (error) {
-    showCompositeError(error.message, error.index);
+    showCompositeError(error.message, error.index, variableField(error.variable));
     return;
   }
-  vscode.postMessage({ type: 'savePreset', preset: withUsedBandNames(result.preset, page), bandCount: page.samplesPerPixel });
+  vscode.postMessage({ type: 'savePreset', preset: withUsedBandNames(result.preset, page), bandCount: page.samplesPerPixel, fileName: targetName() });
 });
 
 /**
@@ -2159,18 +2980,17 @@ $('openSettings').addEventListener('click', (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Overlays
+// Layers
 // ---------------------------------------------------------------------------
 
-const overlays = new Overlays({
+const layers = new Layers({
   post: (message) => vscode.postMessage(message),
   redraw: () => draw(),
-  view: () => ({ scale: view.scale, tx: view.tx, ty: view.ty, dpr: devicePixelRatio, width: stage.clientWidth, height: stage.clientHeight }),
-  page: () => currentPage(),
   showWindow: (window) => {
-    const page = currentPage();
-    if (!page) return;
-    const [x0, y0, x1, y1] = [Math.max(0, window[0]), Math.max(0, window[1]), Math.min(page.width, window[2]), Math.min(page.height, window[3])];
+    if (!grid) return;
+    // Bounded: within the canvas's extent; unbounded: wherever the layer is.
+    const [b0, b1, b2, b3] = layers.unbounded ? [-Infinity, -Infinity, Infinity, Infinity] : grid.bounds;
+    const [x0, y0, x1, y1] = [Math.max(b0, window[0]), Math.max(b1, window[1]), Math.min(b2, window[2]), Math.min(b3, window[3])];
     const w = Math.max(1, x1 - x0);
     const h = Math.max(1, y1 - y0);
     view.scale = Math.min(maxScale(), Math.max(minScale(), 0.9 * Math.min(stage.clientWidth / w, stage.clientHeight / h)));
@@ -2178,6 +2998,45 @@ const overlays = new Overlays({
     view.ty = stage.clientHeight / 2 - ((y0 + y1) / 2) * view.scale;
     fitMode = undefined;
     layout();
+  },
+  // Added rasters decode in their own worker, without helpers (the opened image keeps those).
+  createWorker: (onMessage) => createWorker(onMessage, 0),
+  rasterAdded,
+  rasterRemoved,
+  rasterMessage: (layer, message) => {
+    if (layer === target) onClassifyMessage(message);
+  },
+  rasterPixel: () => renderReadout(),
+  selectTarget,
+  setCrs: (crs) => {
+    chosenCrs = crs;
+    rebuildGrid();
+    fitMode = 'auto';
+    layout(0);
+  },
+  startGrid,
+  imageRemoved,
+  allRemoved,
+  layersChanged: () => {
+    updateRenderingTarget();
+    // Bounded again after zooming out over the world: back to the map's extent.
+    if (!layers.unbounded && view.scale < minScale() * 0.999) {
+      setFit('auto');
+      return;
+    }
+    clampView();
+    updateZoomLabel();
+    draw();
+    scheduleTiles();
+  },
+  openRendering: (layer) => openRendering(layer),
+  openVectorRendering: (id) => openVectorRendering(id),
+  openBasemapRendering: (id) => openBasemapRendering(id),
+  // Selected without opening the Rendering panel (a click on a layer's ⠿).
+  selectLayer: (choice) => {
+    if (choice.kind === 'vector') openVectorRendering(choice.id, false);
+    else if (choice.kind === 'basemap') openBasemapRendering(choice.id, false);
+    else openRendering(choice.kind === 'raster' ? choice.layer : undefined, false);
   },
 });
 
@@ -2187,25 +3046,28 @@ const overlays = new Overlays({
 
 window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
   const message = event.data;
-  if (overlays.onHostMessage(message)) return;
+  if (layers.onHostMessage(message)) return;
   switch (message.type) {
     case 'init':
       fileName = message.fileName;
       userPresets = message.presets;
       remembered = message.remembered;
-      void start(message.fileSize);
+      if (message.vector) startVector(message.vector, message.fileSize);
+      else void start(message.fileSize);
       break;
     case 'colorMapLoaded':
       onColorMapLoaded(message.text, message.fileName);
       break;
     case 'presets':
       userPresets = message.presets;
-      if (currentPage()) {
+      if (targetPage()) {
         applySelection(message.select ? { kind: 'preset', name: message.select } : selection, !!message.select);
       }
+      refreshOtherRenderings();
       break;
     case 'reload':
-      void start(message.fileSize);
+      // The file changed on disk: show it again, unless its layer was removed.
+      if (!imageGone && !vectorFile) void start(message.fileSize);
       break;
     case 'readResult': {
       const buffers = message.data.map(toBytes).map((chunk) =>

@@ -16,9 +16,11 @@ await esbuild.build({
       `export * from './src/webview/geo.ts';`,
       `export * from './src/webview/tilegrid.ts';`,
       `export { parseWkb, parseGpkgGeometry, epsgToProj4 } from './src/webview/vectors.ts';`,
-      `export { prepareStyle } from './src/webview/basemap.ts';`,
+      `export { prepareStyle, localizeUrl, localizeStyle, localizationSupport } from './src/webview/basemap.ts';`,
       `export { BASEMAP_PROVIDERS } from './src/shared/basemaps.ts';`,
       `export { toBytes } from './src/webview/bytes.ts';`,
+      `export { imageGrid, warpedGrid, parseCrs, utmCode } from './src/webview/grid.ts';`,
+      `export { pixelMapping, extentInCanvas } from './src/webview/rasterLayer.ts';`,
     ].join('\n'),
     resolveDir: root,
     loader: 'ts',
@@ -164,6 +166,77 @@ await test('GeoPackage geometry blobs: header, envelope, empty geometries', () =
   assert.deepEqual(lib.parseGpkgGeometry(blob(0b0000_0011, [10, 10, 20, 20], point)), { type: 'Point', coordinates: [10, 20] }, 'with an XY envelope');
   assert.equal(lib.parseGpkgGeometry(blob(0b0001_0001, [], point)), null, 'empty');
   assert.equal(lib.parseGpkgGeometry(Uint8Array.of(1, 2, 3)), null, 'not a GeoPackage blob');
+});
+
+console.log('Layers and coordinate systems');
+await test('EPSG codes for the canvas: parsed, unknown ones refused', () => {
+  assert.equal(lib.parseCrs('EPSG:4326').code, 4326);
+  assert.equal(lib.parseCrs(' epsg 32633 ').code, 32633);
+  assert.ok(lib.parseCrs('3857').proj4.includes('+proj=merc'));
+  assert.ok(lib.parseCrs('EPSG:4326').geographic);
+  assert.match(lib.parseCrs('EPSG:999999'), /not a coordinate system/);
+  assert.match(lib.parseCrs('UTM'), /EPSG code/);
+  assert.equal(lib.utmCode(-74.2, 3.5), 32618);
+  assert.equal(lib.utmCode(-43.3, -21.7), 32723);
+});
+await test("the image warped into EPSG:4326: every pixel lands where its longitude / latitude says, and back", () => {
+  const page = { width: 2414, height: 2914, geo };
+  const crs = lib.parseCrs('EPSG:4326');
+  const grid = lib.warpedGrid(page, crs);
+  assert.equal(grid.identity, false);
+  const image = new lib.GeoMapper(geo);
+  const canvas = new lib.GeoMapper(grid.geo);
+  let worst = 0;
+  let back = 0;
+  for (const [x, y] of [[0, 0], [2414, 2914], [1207, 1457], [100, 2800], [2400, 30]]) {
+    const [gx, gy] = grid.image.toCanvas(x, y);
+    const [lon1, lat1] = image.pixelToLonLat(x, y);
+    const [lon2, lat2] = canvas.pixelToLonLat(gx, gy);
+    worst = Math.max(worst, Math.abs(lon1 - lon2), Math.abs(lat1 - lat2));
+    const [bx, by] = grid.image.toSource(gx, gy);
+    back = Math.max(back, Math.abs(bx - x), Math.abs(by - y));
+  }
+  assert.ok(worst < 1e-9, `lon/lat off by ${worst}`);
+  assert.ok(back < 1e-6, `round trip off by ${back} px`);
+  // About the image's resolution: 10 m is about 9e-5 degrees here.
+  near(grid.geo.transform[1], 9.0e-5, 0.3e-5, 'pixel size');
+  // The grid covers the image's outline.
+  const [b0, b1, b2, b3] = grid.bounds;
+  assert.ok(b0 >= -1e-6 && b1 >= -1e-6 && b2 <= grid.width + 1e-6 && b3 <= grid.height + 1e-6);
+});
+await test('a layer in the same coordinate system is placed with an affine transform; others are warped; non-georeferenced refused', () => {
+  // A second Sentinel-2 grid, 20 m, offset by 1000 m east and 500 m south.
+  const other = { ...geo, transform: [581920, 20, 0, 400070, 0, -20] };
+  const same = lib.pixelMapping(other, geo);
+  assert.deepEqual(same.affine.map((v) => +v.toFixed(9)), [2, 0, 0, 2, 100, 50]);
+  const wgs = { transform: [-74.27, 0.0001, 0, 3.62, 0, -0.0001], proj4: '+proj=longlat +datum=WGS84 +no_defs', factors: { x: 1, y: 1 }, crsName: 'EPSG:4326', geographic: true };
+  const warped = lib.pixelMapping(wgs, geo);
+  assert.equal(warped.affine, undefined);
+  const [x, y] = warped.toCanvas(100, 100);
+  const [lon, lat] = new lib.GeoMapper(geo).pixelToLonLat(x, y);
+  near(lon, -74.27 + 0.01, 1e-9, 'lon');
+  near(lat, 3.62 - 0.01, 1e-9, 'lat');
+  assert.equal(lib.pixelMapping(undefined, geo), undefined);
+  // Its extent in the image's pixels.
+  const extent = lib.extentInCanvas({ width: 50, height: 50 }, same);
+  assert.deepEqual(extent.map((v) => +v.toFixed(6)), [100, 50, 200, 150]);
+});
+
+await test('basemap localisation: Google hl/gl, Bing mkt, OpenFreeMap label language; others none', () => {
+  const google = 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
+  assert.deepEqual(lib.localizationSupport(google), { language: true, region: true });
+  assert.deepEqual(lib.localizationSupport('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}'), { language: false, region: false }, 'satellite: no labels');
+  assert.equal(lib.localizeUrl(google, { language: 'ja', region: 'JP' }), google + '&hl=ja&gl=JP');
+  assert.equal(lib.localizeUrl(google, { language: '', region: '' }), google);
+  const bing = 'http://ecn.t3.tiles.virtualearth.net/tiles/r{q}.png?g=1';
+  assert.equal(lib.localizeUrl(bing, { language: 'fr', region: '' }), bing + '&mkt=fr-FR');
+  assert.equal(lib.localizeUrl(bing, { language: 'en', region: 'GB' }), bing + '&mkt=en-GB');
+  assert.deepEqual(lib.localizationSupport('http://ecn.t3.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1'), { language: false, region: false }, 'aerial');
+  assert.deepEqual(lib.localizationSupport('https://tiles.openfreemap.org/styles/liberty'), { language: true, region: false });
+  assert.deepEqual(lib.localizationSupport('https://tile.openstreetmap.org/{z}/{x}/{y}.png'), { language: false, region: false });
+  const style = lib.localizeStyle({ layers: [{ layout: { 'text-field': ['get', 'name'] } }, { layout: {} }] }, 'de');
+  assert.deepEqual(style.layers[0].layout['text-field'], ['coalesce', ['get', 'name:de'], ['get', 'name']]);
+  assert.equal(style.layers[1].layout['text-field'], undefined);
 });
 
 if (failures) {

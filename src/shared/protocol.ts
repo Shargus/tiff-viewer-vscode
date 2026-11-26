@@ -55,6 +55,8 @@ export type HostToWebview =
       presets: Preset[];
       /** Last selection for this file, if any. */
       remembered?: Selection;
+      /** The file is a vector file (its URI): it is the viewer's first layer. */
+      vector?: string;
     }
   | { type: 'presets'; presets: Preset[]; select?: string }
   | { type: 'colorMapLoaded'; text: string; fileName: string }
@@ -62,19 +64,23 @@ export type HostToWebview =
   | { type: 'fetched'; id: number; ok: boolean; status: number; bytes?: Uint8Array; text?: string; contentType?: string; error?: string }
   /** Answer to 'readOverlay'. */
   | { type: 'overlayRead'; id: number; ok: boolean; path: string; name: string; files?: OverlayFile[]; error?: string }
-  /** Answer to 'browseOverlay': the chosen paths (relative to the workspace folder when inside it). */
-  | { type: 'overlayBrowsed'; paths: string[] }
+  /** Answer to 'browseLayers': the chosen paths (relative to the workspace folder when inside it). */
+  | { type: 'layersBrowsed'; paths: string[] }
+  /** Answer to 'openRaster': the file is open for 'read' with `file: id`. */
+  | { type: 'rasterOpened'; id: number; ok: boolean; name: string; fileSize?: number; error?: string }
   /** Answer to 'chooseLayers': the indexes picked, or none when cancelled. */
   | { type: 'layersChosen'; id: number; indexes: number[] }
-  | { type: 'readResult'; id: number; data: Uint8Array[] }
-  | { type: 'readError'; id: number; message: string }
+  /** Answers to 'read'; `file` is the raster layer's id, absent for the opened image. */
+  | { type: 'readResult'; id: number; file?: number; data: Uint8Array[] }
+  | { type: 'readError'; id: number; file?: number; message: string }
   | { type: 'reload'; fileSize: number };
 
 export type WebviewToHost =
   | { type: 'ready' }
-  | { type: 'read'; id: number; ranges: ByteRange[] }
+  /** Reads bytes of the opened image, or of raster layer `file`. */
+  | { type: 'read'; id: number; file?: number; ranges: ByteRange[] }
   /** Asks for a name (and auto-apply rule) and stores the preset in the presets file. */
-  | { type: 'savePreset'; preset: Preset; bandCount: number }
+  | { type: 'savePreset'; preset: Preset; bandCount: number; fileName?: string }
   | { type: 'deletePreset'; name: string }
   | { type: 'remember'; selection: Selection }
   | { type: 'openPresetsFile' }
@@ -84,10 +90,13 @@ export type WebviewToHost =
   | { type: 'exportColorMap'; text: string; fileName: string }
   /** Fetches an http(s) URL through the extension host (map tiles, styles, capabilities). */
   | { type: 'fetch'; id: number; url: string; as: 'bytes' | 'text' }
-  /** Reads a vector file for an overlay; `path` is absolute or relative to the workspace folder. */
+  /** Reads a vector file for a layer; `path` is absolute, relative to the workspace folder, or a URI. */
   | { type: 'readOverlay'; id: number; path: string }
-  /** Asks the user to pick vector files. */
-  | { type: 'browseOverlay' }
+  /** Asks the user to pick layer files (raster or vector); answered with 'layersBrowsed'. */
+  | { type: 'browseLayers' }
+  /** Opens a TIFF as raster layer `id`: a path (absolute or relative to the workspace folder) or a URI; answered with 'rasterOpened'. */
+  | { type: 'openRaster'; id: number; path: string }
+  | { type: 'closeRaster'; id: number }
   /** Asks which layers of a multi-layer vector file to load; answered with 'layersChosen'. */
   | { type: 'chooseLayers'; id: number; file: string; layers: { name: string; count: number }[] };
 

@@ -156,6 +156,22 @@ select {
   text-align: right;
 }
 
+/* One table per layer under the pointer. */
+#pixelTip table + table,
+#pixelTip .tip-where + table {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #888));
+}
+
+#pixelTip .tip-where {
+  color: var(--vscode-descriptionForeground);
+}
+
+#pixelTip caption strong {
+  color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground, #222));
+}
+
 #pixelTip tbody + tbody tr:first-child > * {
   border-top: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, #888));
 }
@@ -164,6 +180,47 @@ select {
 #stage:focus,
 #stage:focus-visible {
   outline: none;
+}
+
+#rasterRendering[hidden],
+.vector-rendering[hidden] {
+  display: none;
+}
+
+#composite .vector-rendering .field.slider-field {
+  grid-template-columns: 90px 1fr 56px;
+}
+
+.vector-rendering input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--vscode-button-background);
+}
+
+.vector-rendering input[type='color'] {
+  width: 48px;
+  height: 22px;
+  padding: 0 2px;
+  border: 1px solid var(--vscode-input-border, transparent);
+  background: var(--vscode-input-background);
+}
+
+.rendering-layer {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+
+.rendering-layer[hidden] {
+  display: none;
+}
+
+.rendering-layer select {
+  min-width: 0;
+  width: 100%;
 }
 
 #stage.dragging {
@@ -274,12 +331,162 @@ select {
   flex: 1;
 }
 
-/* Many bands: the values give way (ending in …) so the coordinate system and file size stay visible. */
-#status > #statusValue {
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* Icon toggles in the status bar: unbounded view, coordinates & scale, values on hovering. */
+#status > .status-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: -2px 0;
+}
+
+.status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--vscode-descriptionForeground, #666);
+  cursor: pointer;
+}
+
+.status-icon:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-foreground);
+}
+
+.status-icon[aria-pressed='true'] {
+  border-color: var(--vscode-focusBorder, #0a84ff);
+  background: var(--vscode-toolbar-activeBackground, rgba(10, 132, 255, 0.15));
+  color: var(--vscode-foreground, #222);
+}
+
+.status-icon:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* The coordinate system in the status bar: click to change it. */
+#status > .status-button {
+  flex-shrink: 0;
+  height: auto;
+  padding: 0 4px;
+  margin: -1px 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+#status > .status-button:hover,
+#status > .status-button[aria-expanded='true'] {
+  border-color: var(--vscode-focusBorder, #0a84ff);
+  color: var(--vscode-foreground);
+}
+
+#status > .status-button[hidden] {
+  display: none;
+}
+
+.crs-menu {
+  position: fixed;
+  z-index: 20;
+  width: 400px;
+  max-width: calc(100vw - 8px);
+  max-height: 70vh;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border, #888));
+  border-radius: 4px;
+  background: var(--vscode-menu-background, var(--vscode-editor-background, #fff));
+  color: var(--vscode-menu-foreground, var(--vscode-foreground, #222));
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+}
+
+.crs-menu[hidden] {
+  display: none;
+}
+
+.crs-choices {
+  display: flex;
+  flex-direction: column;
+}
+
+.crs-choice {
+  display: grid;
+  grid-template-columns: 16px auto 1fr;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  height: auto;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.crs-choice:hover,
+.crs-choice:focus-visible {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2)));
+  color: var(--vscode-menu-selectionForeground, inherit);
+}
+
+.crs-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.crs-detail {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.crs-other {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 6px 2px;
+  border-top: 1px solid var(--vscode-menu-separatorBackground, var(--vscode-panel-border, #888));
+}
+
+.crs-menu .error {
+  margin: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+  background: var(--vscode-inputValidation-errorBackground, transparent);
+}
+
+.crs-menu .error[hidden] {
+  display: none;
+}
+
+/* The left border of an open side panel: drag it to resize the panel. */
+.panel-resizer {
+  position: relative;
+  z-index: 3;
+  flex: 0 0 5px;
+  margin-right: -3px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.panel-resizer:hover,
+.panel-resizer.dragging {
+  background: var(--vscode-sash-hoverBorder, var(--vscode-focusBorder, #0a84ff));
+}
+
+.panel-resizer:has(+ aside[hidden]) {
+  display: none;
 }
 
 /* Side panels (composite editor, info) */
@@ -591,8 +798,63 @@ button:disabled:hover {
   grid-template-columns: max-content 1fr;
 }
 
-/* Overlays panel */
-#overlays {
+/* The × closing a side panel: top right, staying in view while the panel scrolls. */
+.panel-close {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  float: right;
+  width: 22px;
+  height: 22px;
+  margin: 2px -6px 0 4px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--vscode-descriptionForeground);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.panel-close:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-foreground);
+}
+
+/* Variables in the Rendering panel: ⠿ name = expression ↵ × */
+.variable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.variable-row {
+  display: grid;
+  grid-template-columns: auto 72px auto 1fr auto auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.variable-row input {
+  min-width: 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.variable-row.dragging {
+  opacity: 0.5;
+}
+
+.variable-row.drop-above {
+  box-shadow: 0 -2px 0 var(--vscode-focusBorder);
+}
+
+.variable-row.drop-below {
+  box-shadow: 0 2px 0 var(--vscode-focusBorder);
+}
+
+/* Layers panel */
+#layers {
   width: 340px;
   max-width: 50%;
   overflow: auto;
@@ -602,11 +864,11 @@ button:disabled:hover {
   user-select: text;
 }
 
-#overlays[hidden] {
+#layers[hidden] {
   display: none;
 }
 
-#overlays h3 {
+#layers h3 {
   margin: 12px 0 6px;
   font-size: 11px;
   font-weight: 600;
@@ -615,7 +877,7 @@ button:disabled:hover {
   color: var(--vscode-descriptionForeground);
 }
 
-#overlays .field {
+#layers .field {
   display: grid;
   grid-template-columns: 90px 1fr;
   align-items: center;
@@ -623,50 +885,50 @@ button:disabled:hover {
   margin-top: 6px;
 }
 
-#overlays .field[hidden],
-#overlays [hidden] {
+#layers .field[hidden],
+#layers [hidden] {
   display: none;
 }
 
-#overlays .field.slider-field {
+#layers .field.slider-field {
   grid-template-columns: 90px 1fr 56px;
 }
 
-#overlays .field select,
-#overlays .field input[type='text'] {
+#layers .field select,
+#layers .field input[type='text'] {
   min-width: 0;
   width: 100%;
 }
 
-#overlays input[type='range'] {
+#layers input[type='range'] {
   width: 100%;
   min-width: 0;
   margin: 0;
   accent-color: var(--vscode-button-background);
 }
 
-#overlays .hint {
+#layers .hint {
   margin: 6px 0;
   font-size: 12px;
   color: var(--vscode-descriptionForeground);
   overflow-wrap: anywhere;
 }
 
-#overlays .check {
+#layers .check {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-top: 6px;
 }
 
-#overlays .buttons {
+#layers .buttons {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }
 
-#overlays .error {
+#layers .error {
   margin: 6px 0;
   padding: 4px 6px;
   border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
@@ -674,59 +936,158 @@ button:disabled:hover {
   overflow-wrap: anywhere;
 }
 
-#overlays .error[hidden] {
+#layers .error[hidden] {
   display: none;
 }
 
-.vector-add {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 6px;
+.basemap-picker {
+  margin: 6px 0;
+  padding: 4px 8px 6px;
+  border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, #888));
+  border-radius: 3px;
 }
 
-.vector-list {
+.basemap-picker[hidden] {
+  display: none;
+}
+
+.layer-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.layer-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 6px;
+  gap: 4px;
+  margin-top: 8px;
 }
 
-.vector-layer {
-  padding: 4px 6px;
+.layer-row {
+  padding: 3px 6px 4px;
   border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
   border-radius: 3px;
 }
 
-.vector-top {
+/* The raster the Rendering panel edits. */
+.layer-row.selected {
+  border-color: var(--vscode-focusBorder);
+  background: var(--vscode-list-inactiveSelectionBackground, transparent);
+}
+
+/* Outside the map's extent while it is bounded: struck through (the tooltip says why). */
+.layer-row.outside .layer-name {
+  text-decoration: line-through;
+}
+
+.layer-row.dragging {
+  opacity: 0.5;
+}
+
+.layer-row.drop-above {
+  box-shadow: 0 -2px 0 var(--vscode-focusBorder);
+}
+
+.layer-row.drop-below {
+  box-shadow: 0 2px 0 var(--vscode-focusBorder);
+}
+
+.layer-top {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  grid-template-columns: auto auto auto 1fr auto auto auto;
   align-items: center;
   gap: 6px;
 }
 
-.vector-name {
+.layer-handle {
+  cursor: grab;
+  color: var(--vscode-descriptionForeground);
+  user-select: none;
+}
+
+.layer-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.vector-warning {
-  margin-top: 4px;
-  padding: 2px 6px;
-  border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700);
-  background: var(--vscode-inputValidation-warningBackground, transparent);
-  overflow-wrap: anywhere;
+.layer-name.selectable {
+  cursor: pointer;
 }
 
-.vector-style {
+.layer-name.selectable:hover {
+  text-decoration: underline;
+}
+
+/* R (raster), V (vector) or B (basemap), between the visibility box and the name. */
+.layer-kind {
+  font-weight: 700;
+}
+
+.layer-row.image .layer-kind,
+.layer-row.raster .layer-kind {
+  color: var(--vscode-charts-green, #388a34);
+}
+
+.layer-row.vector .layer-kind {
+  color: var(--vscode-charts-red, #e51400);
+}
+
+.layer-row.basemap .layer-kind {
+  color: var(--vscode-charts-blue, #1a85ff);
+}
+
+#layers .layer-progress {
+  margin: 0;
+  font-size: 11px;
+}
+
+.layer-style {
   display: grid;
   grid-template-columns: 36px 56px 1fr;
   align-items: center;
   gap: 6px;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
-.vector-style input[type='color'] {
+.layer-style.raster {
+  grid-template-columns: 1fr;
+}
+
+/* A thin opacity slider: a 3 px track and a small thumb. */
+.layer-style input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.layer-style input[type='range']::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--vscode-scrollbarSlider-background, rgba(128, 128, 128, 0.4));
+}
+
+.layer-style input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  border: none;
+  border-radius: 50%;
+  background: var(--vscode-button-background, #0a84ff);
+}
+
+.layer-style input[type='range']:focus-visible::-webkit-slider-thumb {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.layer-style input[type='color'] {
   width: 32px;
   height: 22px;
   padding: 0 2px;
@@ -734,11 +1095,11 @@ button:disabled:hover {
   background: var(--vscode-input-background);
 }
 
-#ticksToggle[aria-pressed='true'] {
-  background: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
+#layers .error {
+  white-space: pre-line;
 }
 
-#overlaysToggle:disabled {
+
+#layersToggle:disabled {
   opacity: 0.5;
 }

@@ -19,8 +19,9 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 - **Colour models**: grayscale (WhiteIsZero / BlackIsZero), RGB, palette, CMYK, YCbCr, CIE L\*a\*b\*, with alpha (associated or unassociated).
 - **High bit depth and float data** are contrast-stretched: by default from the image's minimum to its maximum; in the **Rendering** panel, per channel, *min–max*, *2%–98%*, or the *full range* of the data type. NaN and GDAL NoData pixels are shown as transparent.
 - **Band composites** for multi-band imagery (such as satellite imagery): RGB composites and band math with colour maps, saved as presets that can apply automatically (see below).
-- **Overlays** on GeoTIFFs: online basemaps (raster, vector tiles and WMTS) and vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips), reprojected into the image's coordinate system and clipped to its extent, each with its own opacity; coordinate ticks and a scale bar.
-- **Pixel readout**: the status bar shows the coordinates and the raw sample values under the cursor (and the composite's values); for a GeoTIFF also the longitude and latitude of the pixel's centre, and the coordinate system. Press <kbd>Space</kbd> to show them in a table next to the cursor instead, and again to go back to the status bar: each band by its name in the file (or b1…bN, if no names are available). The values follow the cursor as it moves.
+- **Layers**, as in QGIS: GeoTIFFs (each with its own rendering), vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips) and online basemaps (raster, vector tiles and WMTS), added with **+ Add layer…** and **+ Add basemap…**, reordered, hidden and made see-through; everything drawn in one coordinate system (a layer's, or any EPSG code); coordinate ticks and a scale bar. Vector files can be opened in the viewer too (**Open With…**).
+- **Pixel readout**: the status bar shows the pixel under the cursor (and, for a GeoTIFF, the longitude and latitude of its centre, and the coordinate system). Press <kbd>Space</kbd>, or the status bar's values button, to show the band values and the rendered values in a table next to the cursor, and again to hide it: each band by its name in the file (or b1…bN, if no names are available). The values follow the cursor as it moves.
+- **Status bar buttons**, next to the image's size: **Unbounded view** (globe; <kbd>U</kbd>), **Show coordinates & scale** (grid; <kbd>G</kbd>) and **Show band and rendered values on hovering** (pointer and table; <kbd>Space</kbd>). The first two need georeferenced layers.
 - **Info panel**: format, byte order, dimensions, bit depth, compression, tiling, pyramid levels, GDAL metadata items (as `gdalinfo` shows them), GeoTIFF keys, and every TIFF tag, including private and custom ones (by number). Long values expand on click.
 - Reloads automatically when the file changes on disk.
 
@@ -28,16 +29,19 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 
 | Action | Mouse / trackpad | Keyboard |
 | --- | --- | --- |
-| Zoom | <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + wheel, pinch | <kbd>+</kbd> / <kbd>-</kbd> |
-| Pan | Drag, scroll | Arrow keys (<kbd>Shift</kbd> for larger steps) |
+| Zoom | Wheel (around the pointer), pinch | <kbd>+</kbd> / <kbd>-</kbd> |
+| Pan | Drag | Arrow keys (<kbd>Shift</kbd> for larger steps) |
 | Fit to window | Double-click, **Fit** | <kbd>0</kbd> |
 | Actual size (100%) | **1:1** | <kbd>1</kbd> |
 | Next / previous page | Page selector | <kbd>PageDown</kbd> / <kbd>PageUp</kbd>, <kbd>]</kbd> / <kbd>[</kbd> |
 | Info panel | **Info** | |
+| Resize a side panel | Drag its left border (double-click: default width; kept until the viewer is closed) | |
 | Rendering panel | **Rendering** | |
-| Overlays panel (GeoTIFFs) | **Overlays** | |
-| Pixel values in a table next to the cursor (on / off) | | <kbd>Space</kbd> |
-| Coordinates & scale (GeoTIFFs, on / off) | **Overlays** → **Show coordinates & scale** | <kbd>G</kbd> |
+| Layers panel (GeoTIFFs) | **Layers** | |
+| Pixel values in a table next to the cursor (on / off) | Values button in the status bar | <kbd>Space</kbd> |
+| Coordinates & scale (GeoTIFFs, on / off) | Grid button in the status bar | <kbd>G</kbd> |
+| Unbounded view (GeoTIFFs, on / off) | Globe button in the status bar | <kbd>U</kbd> |
+| Coordinate system (GeoTIFFs) | Click it in the status bar | |
 
 ## Band composites and presets
 
@@ -47,7 +51,7 @@ Click **Rendering** in the toolbar to show the data your way:
 - **Single band**: one expression shown with a colour map, e.g. `(B08 - B04) / (B08 + B04)` with *RdYlGn*.
 - **Paletted**: a colour for each value of a band, for classifications and masks, e.g. the Sentinel-2 scene classification `SCL` (see below).
 
-Each channel's **min** and **max** are the values shown respectively as black and white. Leave both empty (as in a new composite) to stretch automatically: **auto =** then lets you choose, per channel, between **Min / Max** (the image's lowest and highest values, the default), **2% / 98%** (ignoring the darkest and brightest 2%), and **Full range** (the whole range of the data type, e.g. 0 to 65535 for 16-bit data). Pixels where every channel is NoData are transparent, and the status bar shows the computed values next to the raw band values under the cursor.
+Each channel's **min** and **max** are the values shown respectively as black and white. Leave both empty (as in a new composite) to stretch automatically: **auto =** then lets you choose, per channel, between **Min / Max** (the image's lowest and highest values, the default), **2% / 98%** (ignoring the darkest and brightest 2%), and **Full range** (the whole range of the data type, e.g. 0 to 65535 for 16-bit data). Pixels where every channel is NoData are transparent, and the value table (<kbd>Space</kbd>) shows the computed values below the raw band values under the cursor.
 
 **Brightness**, **contrast**, **saturation** and **gamma** work as in QGIS's raster symbology: brightness from −255 to 255, contrast and saturation from −100 to 100 (0: unchanged; saturation −100: grey), gamma from 0.1 to 10 (1: unchanged; above 1 brightens dark tones).
 
@@ -59,7 +63,7 @@ Like QGIS's *Paletted/Unique values* renderer: each value listed in the table ge
 - **+** adds a value (the next whole number), **−** deletes the selected classes, **Delete all** empties the table.
 - Edit a value, colour, opacity or label in the table. Tick several classes to change their colour, opacity or label together. Changing the colour ramp re-colours every class.
 - **…** offers **Load classes from layer** (the image's own colour table, for paletted TIFFs), **Load colour map from file…** and **Export colour map to file…** in QGIS's `.clr` format: one class per line, `value red green blue alpha label`.
-- The status bar shows the value under the cursor with its label.
+- The value table (<kbd>Space</kbd>) shows the value under the cursor with its label.
 
 ### Band names and expressions
 
@@ -67,15 +71,16 @@ Expressions can use:
 
 - `b1` … `bN`: band numbers, always available.
 - The file's band descriptions (as written by GDAL, rasterio, Google Earth Engine, …), e.g. `B04`, `B8A`, `VV`. The panel lists them; click one to insert it.
-- Names defined in the preset's `bands` (for files without band descriptions) and `variables` (see below).
+- Names defined in the preset's `bands` (for files without band descriptions).
+- **Variables**: named expressions, listed in the panel's **Variables** section after the bands. **+ Add variable** adds one; edit its name and expression in place; drag **⠿** to change the order (each variable can use the bands and the variables above it, the channels can use them all); **↵** inserts it into the expression being edited; **×** removes it. They are saved with the preset (`variables`).
 
 They support `+ - * / % ^`, comparisons `< <= > >= == !=` (1 or 0), and `abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2`, plus `pi` and `nodata`.
 
-`nodata` is a missing value, which is what the file's NoData pixels are inside expressions, whatever number the file uses for them; it works the same in files without a NoData value. Missing results are shown transparent (in RGB, where all three channels are missing) and read *NoData* in the status bar. So `where(SCL == 9, nodata, B04)` hides cloudy pixels instead of blacking them out, `x == nodata` is 1 where `x` is missing (like `isnan(x)`) and `x != nodata` the opposite, and `where(B04 == nodata, 0, B04)` fills missing pixels with 0.
+`nodata` is a missing value, which is what the file's NoData pixels are inside expressions, whatever number the file uses for them; it works the same in files without a NoData value. Missing results are shown transparent (in RGB, where all three channels are missing) and read *NoData* in the value table. So `where(SCL == 9, nodata, B04)` hides cloudy pixels instead of blacking them out, `x == nodata` is 1 where `x` is missing (like `isnan(x)`) and `x != nodata` the opposite, and `where(B04 == nodata, 0, B04)` fills missing pixels with 0.
 
 ### Creating presets
 
-The extension comes with no presets: you make the ones you need, and they appear in the **Bands** menu. They are kept in a file in your home folder, **`~/.tiff-viewer-vscode/presets.jsonc`** (on Windows, `%USERPROFILE%\.tiff-viewer-vscode\presets.jsonc`), created when the extension first starts with comments describing the format. With Remote-SSH, WSL or containers, it is in the home folder of the machine the files are on.
+The extension comes with no presets: you make the ones you need, and they appear in the **Preset** menu of the Rendering panel. They are kept in a file in your home folder, **`~/.tiff-viewer-vscode/presets.jsonc`** (on Windows, `%USERPROFILE%\.tiff-viewer-vscode\presets.jsonc`), created when the extension first starts with comments describing the format. With Remote-SSH, WSL or containers, it is in the home folder of the machine the files are on.
 
 There are two ways to create a preset:
 
@@ -86,7 +91,7 @@ The viewer edits only the entry concerned and keeps your comments and formatting
 
 | Field | Meaning |
 | --- | --- |
-| `name` | Name in the Bands menu (required). |
+| `name` | Name in the Preset menu (required). |
 | `red`, `green`, `blue` | An RGB composite: one expression per channel. |
 | `value` | Or a single expression, shown with `colormap`. |
 | `range` | Values shown as black … full brightness: `[min, max]`, or an automatic stretch: `"auto"` (Min / Max), `"percentile"` (2% / 98%) or `"full"` (the data type's range). One for all channels, or a list with one per channel. Default `[0, 1]`. |
@@ -161,18 +166,11 @@ Add e.g. `"match": { "bands": 13 }` to one of them to apply it automatically to 
 
 Useful trick: the SCL can also mask other renderings, since band names work in any expression: `where((SCL == 3) + (SCL == 8) + (SCL == 9) + (SCL == 10), 0, B04)` shows the red band with cloud shadows, clouds and cirrus in black.
 
-## Overlays
+## Layers
 
-For a georeferenced image (a GeoTIFF with a coordinate system), **Overlays** in the toolbar opens a panel with a basemap, vector layers, and coordinates. Everything is reprojected into the image's coordinate system and clipped to the image's extent.
+**Layers** in the toolbar opens a panel that works like QGIS's layer list: rasters (GeoTIFFs) and vector layers, drawn on one canvas in one coordinate system. The button is greyed out for an image without georeferencing, which is shown on its own.
 
-- **Show coordinates & scale** (or <kbd>G</kbd>): ticks of the image's x and y coordinates along the respective borders, a thin grid of lines at the ticks, and a scale bar in metres or kilometres (true ground distance). They follow the zoom: the spacing adapts, and when the image's borders are out of view the ticks run along the edges of the view.
-- **Image opacity**: to see what is under the image.
-- **Basemap**: the selection of the [Basemaps QGIS plugin](https://github.com/Fanchengyan/Basemaps): Esri, Google, OpenStreetMap, OpenTopoMap, OpenRailwayMap, Bing, CARTO, F4map and USGS raster tiles; Esri and OpenFreeMap vector tiles (drawn with MapLibre); and the EOX Sentinel-2 cloudless mosaics (by year), Esri World Imagery Wayback (by date) and NASA GIBS (layers and dates) tile services, whose layer lists are read from the services. The basemap has its own opacity and goes under the image, or above it. Its attribution is shown in the corner.
-- **Vector layers**: type a path, absolute or relative to the workspace folder, or **Browse…**. GeoJSON, KML, KMZ, Shapefile (with its .dbf, .prj, .cpg), GeoPackage (one layer per feature table), and zips of these are read, in any coordinate system they declare. When a file holds several layers (KML/KMZ folders, GeoPackage tables, files in a zip), you are asked which ones to load. Each layer has its own colour, line width, opacity, visibility, *zoom to layer* and remove. File Geodatabases (.gdb) are not supported: export them to GeoPackage.
-
-Double-click an opacity slider to set it back to 100%.
-
-The extension host downloads tiles and styles for the viewer (which has no network access of its own); nothing else leaves your machine. Basemap providers' terms of use apply to their tiles.
+Vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips of them) can be opened in the viewer too: right-click the file and choose **Open With… → TIFF Viewer (vector layer)** (it is never their default editor). The file is then the first layer, and rasters, other vectors and basemaps can be added to it.
 
 ## Using another editor for TIFF files
 
@@ -180,7 +178,7 @@ This viewer is registered as the default editor for TIFF files. To open a file w
 
 ## Limitations
 
-- Overlays: File Geodatabases (.gdb) are not supported; NASA GIBS layers delivered as vector tiles are not listed; images whose coordinate system cannot be expressed for proj4 have no overlays.
+- Layers: File Geodatabases (.gdb) are not supported; NASA GIBS layers delivered as vector tiles are not listed; images whose coordinate system cannot be expressed for proj4 have no layers; a raster layer shows its first page only; the coordinate system is chosen by EPSG code (codes proj4 knows through geotiff-geokeys-to-proj4).
 
 - Not supported: JPEG 2000 (e.g. some Aperio SVS), old-style JPEG (compression 6), LZMA, JPEG XL, and uncompressed chroma-subsampled YCbCr.
 - Pyramid levels stored in SubIFDs (as in some OME-TIFF files) are not used; those images are rendered from full resolution.
@@ -214,7 +212,7 @@ git push --follow-tags
 - `src/webview/main.ts`: the viewer UI: canvas, zoom/pan, the display tile pyramid, info panel.
 - `src/webview/worker.ts`: a Web Worker that parses and decodes the TIFF with [geotiff.js](https://github.com/geotiffjs/geotiff.js), using a block-cached byte-range source (`messageSource.ts`). A few helper workers (same script) decompress tiles in parallel (`decodePool.ts`).
 - `src/webview/lzw.ts`: fast TIFF LZW decoder (Deflate uses the platform's `DecompressionStream`).
-- `src/webview/overlays.ts`, `basemap.ts`, `tilegrid.ts`, `geo.ts`, `vectors.ts`, `georef.ts`: the Overlays panel; basemaps warped into the image's projection; XYZ and WMTS tile grids; projections (proj4); vector file reading; the GeoTIFF's georeferencing.
+- `src/webview/layers.ts`, `rasterLayer.ts`, `grid.ts`, `basemap.ts`, `tilegrid.ts`, `geo.ts`, `vectors.ts`, `georef.ts`: the Layers panel; raster layers (each with its own decoder worker); the canvas grid in the chosen coordinate system; basemaps warped into it; XYZ and WMTS tile grids; projections (proj4); vector file reading; the GeoTIFF's georeferencing.
 - `src/presetStore.ts`: the presets file in `~/.tiff-viewer-vscode` (created, watched, and edited in place with `jsonc-parser`).
 - `src/shared/expression.ts`, `presets.ts`, `colormaps.ts`, `src/webview/composite.ts`: band math (parsed and evaluated over whole tiles, since the webview forbids `eval`), presets, and composite colouring.
 - `src/webview/tiff.ts`: page/pyramid discovery, chunked region reading with box-filter or nearest-neighbour downsampling, and colour conversion.
@@ -242,7 +240,7 @@ Added in TIFF Viewer VS Code:
 
 Both use [geotiff.js](https://github.com/geotiffjs/geotiff.js) to parse and decode TIFF files.
 
-The basemaps offered in the Overlays panel are the selection of Fan Chengyan's [Basemaps](https://github.com/Fanchengyan/Basemaps) QGIS plugin. Overlays use [proj4js](https://github.com/proj4js/proj4js), [geotiff-geokeys-to-proj4](https://github.com/matafokka/geotiff-geokeys-to-proj4), [MapLibre GL JS](https://maplibre.org/), [shapefile-js](https://github.com/calvinmetcalf/shapefile-js), [togeojson](https://github.com/placemark/togeojson), [JSZip](https://stuk.github.io/jszip/) and [sql.js](https://sql.js.org/). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licences.
+The basemaps offered in the Layers panel are the selection of Fan Chengyan's [Basemaps](https://github.com/Fanchengyan/Basemaps) QGIS plugin. Layers use [proj4js](https://github.com/proj4js/proj4js), [geotiff-geokeys-to-proj4](https://github.com/matafokka/geotiff-geokeys-to-proj4), [MapLibre GL JS](https://maplibre.org/), [shapefile-js](https://github.com/calvinmetcalf/shapefile-js), [togeojson](https://github.com/placemark/togeojson), [JSZip](https://stuk.github.io/jszip/) and [sql.js](https://sql.js.org/). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licences.
 
 ## License
 

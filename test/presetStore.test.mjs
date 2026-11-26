@@ -106,6 +106,28 @@ await test('saving a preset with an existing name replaces it in place', async (
   assert.equal((text().match(/"S2 RGB"/g) ?? []).length, 1);
 });
 
+await test('variables made in the Rendering panel are saved and read back as made, in order', async () => {
+  // As the viewer sends it: a variable dragged to the top, one using another, a variable named like a channel.
+  const preset = {
+    name: 'Vars',
+    variables: { green: 'clamp(B03 / 3000, 0, 1)', v1: 'B04 / 10000', v2: 'clamp(v1 * 3, 0, 1)' },
+    red: 'v2',
+    green: 'green',
+    blue: 'v1 * 2',
+  };
+  assert.equal(await store.save(preset), true);
+  const saved = store.get().find((p) => p.name === 'Vars');
+  assert.deepEqual(saved, preset);
+  assert.deepEqual(Object.keys(saved.variables), ['green', 'v1', 'v2'], 'order kept');
+  // As written in the file, and as a new store reads it.
+  assert.match(text(), /"variables": \{\s*"green": "clamp\(B03 \/ 3000, 0, 1\)",\s*"v1": "B04 \/ 10000",\s*"v2": "clamp\(v1 \* 3, 0, 1\)"\s*\}/);
+  const fresh = new lib.PresetStore();
+  await fresh.init();
+  assert.deepEqual(Object.keys(fresh.get().find((p) => p.name === 'Vars').variables), ['green', 'v1', 'v2']);
+  fresh.dispose();
+  await store.delete('Vars');
+});
+
 await test('hand edits (comments, trailing commas) are read, and survive the next save', async () => {
   writeFileSync(
     file,

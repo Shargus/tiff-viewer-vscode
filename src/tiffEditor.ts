@@ -24,10 +24,14 @@ class TiffDocument implements vscode.CustomDocument {
 
   private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.onDidChangeEmitter.event;
-  private readonly watcher: vscode.FileSystemWatcher;
+  private readonly watcher: vscode.FileSystemWatcher | undefined;
   private changeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(readonly uri: vscode.Uri) {
+  constructor(
+    readonly uri: vscode.Uri,
+    watch = true,
+  ) {
+    if (!watch) return;
     const folder = vscode.Uri.joinPath(uri, '..');
     const name = uri.path.slice(uri.path.lastIndexOf('/') + 1);
     this.watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, name));
@@ -93,7 +97,7 @@ class TiffDocument implements vscode.CustomDocument {
 
   dispose(): void {
     clearTimeout(this.changeTimer);
-    this.watcher.dispose();
+    this.watcher?.dispose();
     this.onDidChangeEmitter.dispose();
     void this.close();
   }
@@ -101,16 +105,18 @@ class TiffDocument implements vscode.CustomDocument {
 
 export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<TiffDocument> {
   static readonly viewType = 'tiffViewer.viewer';
+  /** The same viewer for vector files: never their default editor, offered by "Open With…". */
+  static readonly vectorViewTypes = ['tiffViewer.vector'];
 
   static register(context: vscode.ExtensionContext, presets: PresetStore): vscode.Disposable {
-    return vscode.window.registerCustomEditorProvider(
-      TiffEditorProvider.viewType,
-      new TiffEditorProvider(context.extensionUri, context.workspaceState, presets),
-      {
-        supportsMultipleEditorsPerDocument: true,
-        // Decoding large images is expensive; keep the result when the tab is hidden.
-        webviewOptions: { retainContextWhenHidden: true },
-      },
+    const provider = new TiffEditorProvider(context.extensionUri, context.workspaceState, presets);
+    const options = {
+      supportsMultipleEditorsPerDocument: true,
+      // Decoding large images is expensive; keep the result when the tab is hidden.
+      webviewOptions: { retainContextWhenHidden: true },
+    };
+    return vscode.Disposable.from(
+      ...[TiffEditorProvider.viewType, ...TiffEditorProvider.vectorViewTypes].map((viewType) => vscode.window.registerCustomEditorProvider(viewType, provider, options)),
     );
   }
 
@@ -128,6 +134,11 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
   }
 
   async resolveCustomEditor(document: TiffDocument, panel: vscode.WebviewPanel): Promise<void> {
+    this.attach(panel, document);
+  }
+
+  /** Runs the viewer of `document` in `panel`. */
+  private attach(panel: vscode.WebviewPanel, document: TiffDocument): void {
     const webview = panel.webview;
     webview.options = {
       enableScripts: true,
@@ -140,9 +151,16 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
 
     const post = (message: HostToWebview) => webview.postMessage(message);
     const fileName = document.uri.path.slice(document.uri.path.lastIndexOf('/') + 1);
+    // A vector file: the viewer starts with it as its layer (read like any vector layer).
+    const vector = !/\.(tiff?|btf|tf8|tf2)$/i.test(fileName);
     const rememberKey = `selection:${document.uri.toString()}`;
+    /** Where relative paths start, and dialogs open. */
+    const base = overlayBase(document.uri);
+    const folder = vscode.Uri.joinPath(document.uri, '..');
 
     const disposables: vscode.Disposable[] = [];
+    /** Raster layers added in this viewer, by id. */
+    const rasters = new Map<number, TiffDocument>();
     disposables.push(
       webview.onDidReceiveMessage(async (message: WebviewToHost) => {
         switch (message.type) {
@@ -152,6 +170,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
               type: 'init',
               fileName,
               fileSize: document.size,
+              vector: vector ? document.uri.toString() : undefined,
               presets: this.presets.get(),
               remembered: this.state.get<Selection>(rememberKey),
             });
@@ -161,7 +180,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
             void this.state.update(rememberKey, message.selection);
             break;
           case 'savePreset': {
-            const name = await savePreset(this.presets, message.preset, message.bandCount, fileName);
+            const name = await savePreset(this.presets, message.preset, message.bandCount, message.fileName ?? fileName);
             if (name) {
               void post({ type: 'presets', presets: this.presets.get(), select: name });
             }
@@ -177,22 +196,44 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
             void proxyFetch(message.url, message.as).then((result) => post({ type: 'fetched', id: message.id, ...result }));
             break;
           case 'readOverlay':
-            void readOverlay(overlayBase(document.uri), message.path).then((result) => post({ type: 'overlayRead', id: message.id, path: message.path, ...result }));
+            void readOverlay(base, message.path).then((result) => post({ type: 'overlayRead', id: message.id, path: message.path, ...result }));
             break;
-          case 'browseOverlay': {
-            const folder = overlayBase(document.uri);
+          case 'browseLayers': {
             const uris = await vscode.window.showOpenDialog({
-              title: 'Add vector layers',
+              title: 'Add layers',
               canSelectMany: true,
-              defaultUri: vscode.Uri.joinPath(document.uri, '..'),
-              filters: { 'Vector files': VECTOR_EXTENSIONS, 'All files': ['*'] },
+              defaultUri: folder,
+              filters: { 'Raster and vector files': [...RASTER_EXTENSIONS, ...VECTOR_EXTENSIONS], 'Raster files': RASTER_EXTENSIONS, 'Vector files': VECTOR_EXTENSIONS, 'All files': ['*'] },
             });
             if (uris?.length) {
-              const base = folder.path.endsWith('/') ? folder.path : `${folder.path}/`;
-              void post({ type: 'overlayBrowsed', paths: uris.map((u) => (u.scheme === folder.scheme && u.path.startsWith(base) ? u.path.slice(base.length) : u.fsPath)) });
+              const prefix = base.path.endsWith('/') ? base.path : `${base.path}/`;
+              void post({ type: 'layersBrowsed', paths: uris.map((u) => (u.scheme === base.scheme && u.path.startsWith(prefix) ? u.path.slice(prefix.length) : u.scheme === 'file' ? u.fsPath : u.toString())) });
             }
             break;
           }
+          case 'openRaster': {
+            const uri = resolveLayerPath(base, message.path);
+            const name = uri.path.slice(uri.path.lastIndexOf('/') + 1);
+            try {
+              const stat = await vscode.workspace.fs.stat(uri);
+              if (stat.type & vscode.FileType.Directory) throw new Error(`${name} is a folder, not a TIFF file.`);
+              const raster = new TiffDocument(uri, false);
+              await raster.open();
+              rasters.get(message.id)?.dispose();
+              rasters.set(message.id, raster);
+              void post({ type: 'rasterOpened', id: message.id, ok: true, name, fileSize: raster.size });
+            } catch (error) {
+              const text = error instanceof vscode.FileSystemError && error.code === 'FileNotFound' ? `${uri.scheme === 'file' ? uri.fsPath : uri.toString()} does not exist.` : String((error as Error)?.message ?? error);
+              void post({ type: 'rasterOpened', id: message.id, ok: false, name, error: text });
+            }
+            break;
+          }
+          case 'closeRaster':
+            rasters.get(message.id)?.dispose();
+            rasters.delete(message.id);
+            break;
+
+
           case 'chooseLayers': {
             const items = message.layers.map((l, index) => ({
               label: l.name,
@@ -214,7 +255,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
               (await vscode.window.showOpenDialog({
                 title: 'Load Colour Map from File',
                 canSelectMany: false,
-                defaultUri: vscode.Uri.joinPath(document.uri, '..'),
+                defaultUri: folder,
                 filters: { 'Colour maps': ['clr', 'txt'], 'All files': ['*'] },
               })) ?? [];
             if (uri) {
@@ -230,7 +271,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
           case 'exportColorMap': {
             const uri = await vscode.window.showSaveDialog({
               title: 'Export Colour Map to File',
-              defaultUri: vscode.Uri.joinPath(document.uri, '..', message.fileName),
+              defaultUri: vscode.Uri.joinPath(folder, message.fileName),
               filters: { 'Colour maps': ['clr'] },
             });
             if (uri) {
@@ -243,21 +284,28 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
             }
             break;
           }
-          case 'read':
+          case 'read': {
+            const source = message.file === undefined ? document : rasters.get(message.file);
             try {
-              const data = await Promise.all(message.ranges.map((range) => document.read(range)));
-              void post({ type: 'readResult', id: message.id, data });
+              if (!source) throw new Error('The layer is closed.');
+              const data = await Promise.all(message.ranges.map((range) => source.read(range)));
+              void post({ type: 'readResult', id: message.id, file: message.file, data });
             } catch (error) {
-              void post({ type: 'readError', id: message.id, message: String((error as Error)?.message ?? error) });
+              void post({ type: 'readError', id: message.id, file: message.file, message: String((error as Error)?.message ?? error) });
             }
             break;
+          }
         }
       }),
       document.onDidChange(() => void post({ type: 'reload', fileSize: document.size })),
       // Edits of the presets file, by hand or from another viewer or window.
       this.presets.onDidChange((presets) => void post({ type: 'presets', presets })),
     );
-    panel.onDidDispose(() => disposables.forEach((d) => d.dispose()));
+    panel.onDidDispose(() => {
+      disposables.forEach((d) => d.dispose());
+      for (const raster of rasters.values()) raster.dispose();
+      rasters.clear();
+    });
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -296,12 +344,8 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <button id="fit" title="Fit to window (0)">Fit</button>
       <button id="actual" title="Actual size (1)">1:1</button>
     </div>
-    <label class="group" id="presetGroup" hidden title="Rendering preset">
-      <span>Bands</span>
-      <select id="preset"></select>
-    </label>
     <button id="compositeToggle" hidden title="Band rendering: RGB, single band or paletted" aria-pressed="false">Rendering</button>
-    <button id="overlaysToggle" disabled title="Overlays need a georeferenced image (GeoTIFF)" aria-pressed="false">Overlays</button>
+    <button id="layersToggle" disabled title="Layers need a georeferenced image (GeoTIFF)" aria-pressed="false">Layers</button>
     <span class="spacer"></span>
     <button id="infoToggle" title="Image information" aria-pressed="false">Info</button>
   </div>
@@ -312,8 +356,25 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <div id="message" hidden></div>
       <div id="pixelTip" role="tooltip" hidden></div>
     </div>
+    <div class="panel-resizer" data-panel="composite" role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click: default width)"></div>
     <aside id="composite" class="panel" hidden>
-      <h3>Band rendering</h3>
+      <button class="panel-close" data-toggle="compositeToggle" title="Close" aria-label="Close panel">×</button>
+      <h3>Rendering</h3>
+      <label class="rendering-layer"><span>Layer</span><select id="renderingLayer" title="The layer whose rendering is edited" aria-label="Layer whose rendering is edited"></select></label>
+      <label class="rendering-layer" id="presetGroup" hidden title="Rendering preset"><span>Preset</span><select id="preset" aria-label="Rendering preset"></select></label>
+      <div id="basemapRendering" class="vector-rendering" hidden>
+        <p class="hint" id="basemapInfo"></p>
+        <div class="field" id="basemapLanguageRow"><span>Language</span><select id="basemapLanguage" title="Language of the map's labels"></select></div>
+        <div class="field" id="basemapRegionRow"><span>Region</span><select id="basemapRegion" title="Country or region the map is shown for (borders, place names)"></select></div>
+        <p class="hint" id="basemapNoLocalization">This basemap has no language or region options.</p>
+      </div>
+      <div id="vectorRendering" class="vector-rendering" hidden>
+        <div class="field"><span>Colour</span><input type="color" id="vectorColor" title="Colour of lines, outlines, points and fills"></div>
+        <div class="field"><span>Line width</span><input type="number" id="vectorWidth" min="0.5" max="20" step="0.5" title="Width of lines and outlines, in screen pixels"></div>
+        <div class="field slider-field"><span>Fill opacity</span><input type="range" id="vectorFill" min="0" max="100" step="1" aria-label="Fill opacity"><input type="number" id="vectorFillValue" min="0" max="100" step="1" aria-label="Fill opacity (%)"></div>
+        <p class="hint" id="vectorInfo"></p>
+      </div>
+      <div id="rasterRendering">
       <div class="mode" role="radiogroup" aria-label="Render type">
         <label><input type="radio" name="mode" value="rgb" checked> RGB</label>
         <label><input type="radio" name="mode" value="single"> Single band</label>
@@ -370,63 +431,75 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <h3>Bands</h3>
       <p class="hint">Click a band to insert it into the expression being edited.</p>
       <div id="bandList" class="band-list"></div>
+      <h3>Variables</h3>
+      <p class="hint">Named expressions, computed in order: each can use the bands and the variables above it; the channels can use them all. Drag ⠿ to reorder; ↵ inserts a variable into the expression being edited.</p>
+      <div id="variableList" class="variable-list"></div>
+      <div class="buttons"><button id="variableAdd" title="Add a named expression">+ Add variable</button></div>
       <h3>Expressions</h3>
       <p class="hint">Operators <code>+ - * / ^ %</code>, comparisons <code>&lt; &lt;= &gt; &gt;= == !=</code> (1 or 0),
       <code>abs sqrt exp log log10 log2 pow min max clamp where isnan round floor ceil sin cos tan atan2</code>,
       <code>pi</code>, and <code>nodata</code> (a missing value: transparent; <code>x == nodata</code> tests for it).
       Example: <code>(B08 - B04) / (B08 + B04)</code>.</p>
       <p class="hint"><a href="#" id="openSettings">Open the presets file</a> (<code>~/.tiff-viewer-vscode/presets.jsonc</code>)</p>
+      </div>
     </aside>
-    <aside id="overlays" class="panel side-panel" hidden>
-      <h3>Overlays</h3>
-      <p class="hint" id="overlayCrs"></p>
-      <div class="buttons">
-        <button id="ticksToggle" aria-pressed="false" title="Coordinate ticks along the image's lower and left borders, a grid at the ticks, and a scale bar (G)">Show coordinates &amp; scale</button>
+    <div class="panel-resizer" data-panel="layers" role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click: default width)"></div>
+    <aside id="layers" class="panel side-panel" hidden>
+      <button class="panel-close" data-toggle="layersToggle" title="Close" aria-label="Close panel">×</button>
+      <h3>Layers</h3>
+      <div class="layer-add">
+        <button id="layerAdd" title="Add raster (GeoTIFF) or vector files">+ Add layer…</button>
+        <button id="basemapAdd" title="Add an online basemap (it goes to the bottom of the list)" aria-expanded="false">+ Add basemap…</button>
+        <span class="hint" id="layerStatus"></span>
       </div>
-      <div class="field slider-field">
-        <span>Image opacity</span><input type="range" id="imageOpacity" min="0" max="100" step="1" value="100" aria-label="Image opacity"><input type="number" id="imageOpacityValue" min="0" max="100" step="1" value="100" aria-label="Image opacity (%)">
-      </div>
-      <h3>Basemap</h3>
-      <div class="field">
-        <span>Provider</span><select id="basemapProvider"></select>
-      </div>
-      <div class="field" id="basemapItemRow" hidden>
-        <span>Map</span><select id="basemapItem"></select>
-      </div>
-      <div class="field" id="basemapFilterRow" hidden>
-        <span>Filter</span><input type="text" id="basemapFilter" placeholder="filter layers" spellcheck="false">
-      </div>
-      <div class="field" id="basemapTimeRow" hidden>
-        <span>Date</span><input type="text" id="basemapTime" placeholder="default" spellcheck="false" title="Date of time-enabled layers (YYYY-MM-DD), or 'default'">
-      </div>
-      <div id="basemapOptions" hidden>
-        <div class="field slider-field">
-          <span>Opacity</span><input type="range" id="basemapOpacity" min="0" max="100" step="1" value="100" aria-label="Basemap opacity"><input type="number" id="basemapOpacityValue" min="0" max="100" step="1" value="100" aria-label="Basemap opacity (%)">
+      <div id="basemapPicker" class="basemap-picker" hidden>
+        <div class="field">
+          <span>Provider</span><select id="basemapProvider"></select>
         </div>
-        <label class="check"><input type="checkbox" id="basemapAbove"> Above the image</label>
-        <p class="hint" id="basemapAttribution"></p>
+        <div class="field" id="basemapItemRow" hidden>
+          <span>Map</span><select id="basemapItem"></select>
+        </div>
+        <div class="field" id="basemapFilterRow" hidden>
+          <span>Filter</span><input type="text" id="basemapFilter" placeholder="filter layers" spellcheck="false">
+        </div>
+        <div class="field" id="basemapTimeRow" hidden>
+          <span>Date</span><input type="text" id="basemapTime" placeholder="default" spellcheck="false" title="Date of time-enabled layers (YYYY-MM-DD), or 'default'">
+        </div>
+        <p class="hint" id="basemapStatus"></p>
+        <div class="buttons">
+          <button id="basemapPickerAdd">Add</button>
+          <button id="basemapPickerCancel">Cancel</button>
+        </div>
       </div>
-      <p class="hint" id="basemapStatus"></p>
-      <h3>Vector layers</h3>
-      <div class="vector-add">
-        <input type="text" id="vectorPath" placeholder="path to vector file" title="Path to a vector file: absolute, or relative to the workspace folder" spellcheck="false" aria-label="Vector file path">
-        <button id="vectorAdd">Add</button>
-        <button id="vectorBrowse" title="Choose files">Browse…</button>
-      </div>
-      <p class="hint">GeoJSON, KML, KMZ, Shapefile, GeoPackage, or a zip of them.</p>
-      <div id="vectorError" class="error" role="alert" hidden></div>
-      <div id="vectorList" class="vector-list"></div>
+      <div id="layerError" class="error" role="alert" hidden></div>
+      <div id="layerList" class="layer-list"></div>
     </aside>
-    <aside id="info" class="panel" hidden></aside>
+    <div class="panel-resizer" data-panel="info" role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click: default width)"></div>
+    <aside id="info" class="panel" hidden>
+      <button class="panel-close" data-toggle="infoToggle" title="Close" aria-label="Close panel">×</button>
+      <div id="infoContent"></div>
+    </aside>
   </div>
   <div id="status">
     <span id="statusSize"></span>
+    <span class="status-tools" role="toolbar" aria-label="View options">
+      <button id="unboundedToggle" class="status-icon" aria-pressed="false" title="Unbounded view: pan over the whole world and add layers anywhere (off: the view is bounded by the extent of the file the viewer was opened on) (U)" aria-label="Unbounded view"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><ellipse cx="8" cy="8" rx="2.6" ry="6.2"/><path d="M1.8 8h12.4M2.9 4.6h10.2M2.9 11.4h10.2"/></svg></button>
+      <button id="ticksToggle" class="status-icon" aria-pressed="false" title="Show coordinates &amp; scale: ticks along the borders, a grid at the ticks, and a scale bar (G)" aria-label="Show coordinates and scale"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="1.8" width="12.4" height="12.4" rx="0.8"/><path d="M5.9 1.8v12.4M10.1 1.8v12.4M1.8 5.9h12.4M1.8 10.1h12.4"/></svg></button>
+      <button id="valuesToggle" class="status-icon" aria-pressed="false" title="Show band and rendered values on hovering, in a table next to the pointer (Space)" aria-label="Show band and rendered values on hovering"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5.3" y="1.6" width="9.2" height="7.6" rx="1"/><path d="M7 4h5.6M7 6.6h5.6M9.6 1.6v7.6"/><path d="M1.6 7.4l1.9 7.2 1.4-2.6 2.7 2.4 1-1.1-2.6-2.4 2.9-.8z" fill="currentColor" stroke-width="0.6"/></svg></button>
+    </span>
     <span id="statusPos"></span>
-    <span id="statusValue"></span>
     <span class="spacer"></span>
     <span id="statusProgress"></span>
-    <span id="statusCrs"></span>
+    <button id="statusCrs" class="status-button" hidden aria-haspopup="menu" aria-expanded="false"></button>
     <span id="statusFileSize" title="File size"></span>
+  </div>
+  <div id="crsMenu" class="crs-menu" role="menu" hidden>
+    <div id="crsChoices" class="crs-choices"></div>
+    <div class="crs-other">
+      <input type="text" id="crsInput" placeholder="EPSG code, e.g. 32633" spellcheck="false" aria-label="Another coordinate system (EPSG code)">
+      <button id="crsApply">Apply</button>
+    </div>
+    <div id="crsError" class="error" role="alert" hidden></div>
   </div>
   <script nonce="${nonce}">window.TIFF_WORKER_URL = ${JSON.stringify(asset('dist', 'webview', 'worker.js').toString())}; window.TIFF_MAPLIBRE_URL = ${JSON.stringify(asset('dist', 'webview', 'maplibre-gl.js').toString())}; window.TIFF_SQLJS_WASM_URL = ${JSON.stringify(asset('dist', 'webview', 'sql-wasm.wasm').toString())}; window.TIFF_NONCE = ${JSON.stringify(nonce)};</script>
   <script nonce="${nonce}" src="${asset('dist', 'webview', 'main.js')}"></script>
@@ -454,7 +527,7 @@ async function savePreset(store: PresetStore, preset: Preset, bandCount: number,
   const pattern = suggestPattern(fileName);
   type Rule = vscode.QuickPickItem & { match?: Preset['match'] | 'pattern' };
   const rules: Rule[] = [
-    { label: 'Only when chosen', description: 'Select it from the Bands menu', match: undefined },
+    { label: 'Only when chosen', description: 'Choose it from the Preset menu', match: undefined },
     { label: `Files with ${bandCount} band${bandCount === 1 ? '' : 's'}`, description: 'Apply automatically when opened', match: { bands: bandCount } },
     { label: 'Files whose name matches…', description: `A pattern such as ${pattern}`, match: 'pattern' },
   ];
@@ -530,6 +603,25 @@ async function proxyFetch(
 }
 
 const VECTOR_EXTENSIONS = ['geojson', 'json', 'kml', 'kmz', 'shp', 'gpkg', 'zip'];
+const RASTER_EXTENSIONS = ['tif', 'tiff', 'gtif', 'gtiff'];
+
+/**
+ * A layer's file: a URI (possibly remote), a path
+ * starting with ~, an absolute path, or a path relative to `base`.
+ */
+function resolveLayerPath(base: vscode.Uri, path: string): vscode.Uri {
+  const trimmed = path.trim().replace(/^"(.*)"$/, '$1');
+  if (/^[a-z][a-z0-9+.-]+:\/\//i.test(trimmed)) {
+    const uri = vscode.Uri.parse(trimmed);
+    // Dragged from the Explorer of a remote window (SSH, WSL, containers), a file is named as
+    // the UI sees it, vscode-remote://<authority>/path; here, on the remote side, it is a file.
+    if (uri.scheme === 'vscode-remote' && vscode.env.remoteName) return vscode.Uri.file(uri.path);
+    return uri;
+  }
+  const home = os.homedir();
+  const expanded = trimmed === '~' ? home : trimmed.startsWith('~/') ? pathModule.join(home, trimmed.slice(2)) : trimmed;
+  return pathModule.isAbsolute(expanded) ? base.with({ path: vscode.Uri.file(expanded).path }) : vscode.Uri.joinPath(base, expanded);
+}
 
 /**
  * The folder relative overlay paths start from: the workspace folder holding
@@ -548,10 +640,7 @@ async function readOverlay(
   base: vscode.Uri,
   path: string,
 ): Promise<{ ok: boolean; name: string; files?: { name: string; data: Uint8Array }[]; error?: string }> {
-  const trimmed = path.trim().replace(/^"(.*)"$/, '$1');
-  const home = os.homedir();
-  const expanded = trimmed === '~' ? home : trimmed.startsWith('~/') ? pathModule.join(home, trimmed.slice(2)) : trimmed;
-  const uri = pathModule.isAbsolute(expanded) ? base.with({ path: vscode.Uri.file(expanded).path }) : vscode.Uri.joinPath(base, expanded);
+  const uri = resolveLayerPath(base, path);
   const name = uri.path.slice(uri.path.replace(/\/+$/, '').lastIndexOf('/') + 1).replace(/\/+$/, '');
   try {
     const stat = await vscode.workspace.fs.stat(uri);

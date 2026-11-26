@@ -18,6 +18,107 @@ export interface Basemap {
   dispose(): void;
 }
 
+// ---------------------------------------------------------------------------
+// Localisation: the language of labels, and the region (borders, names)
+// ---------------------------------------------------------------------------
+
+/** A basemap's language and region ('' for the provider's default). */
+export interface Localization {
+  language: string;
+  region: string;
+}
+
+/** Languages offered for labels: code (as Google takes it) and name. */
+export const LANGUAGES: [string, string][] = [
+  ['en', 'English'],
+  ['fr', 'Français'],
+  ['de', 'Deutsch'],
+  ['es', 'Español'],
+  ['it', 'Italiano'],
+  ['pt', 'Português'],
+  ['nl', 'Nederlands'],
+  ['pl', 'Polski'],
+  ['sv', 'Svenska'],
+  ['tr', 'Türkçe'],
+  ['ru', 'Русский'],
+  ['ar', 'العربية'],
+  ['hi', 'हिन्दी'],
+  ['zh-CN', '中文'],
+  ['ja', '日本語'],
+  ['ko', '한국어'],
+];
+
+/** Countries and regions offered: ISO code and name. */
+export const REGIONS: [string, string][] = [
+  ['US', 'United States'],
+  ['GB', 'United Kingdom'],
+  ['CA', 'Canada'],
+  ['AU', 'Australia'],
+  ['IN', 'India'],
+  ['FR', 'France'],
+  ['DE', 'Germany'],
+  ['IT', 'Italy'],
+  ['ES', 'Spain'],
+  ['PT', 'Portugal'],
+  ['BR', 'Brazil'],
+  ['MX', 'Mexico'],
+  ['AR', 'Argentina'],
+  ['CO', 'Colombia'],
+  ['NL', 'Netherlands'],
+  ['PL', 'Poland'],
+  ['SE', 'Sweden'],
+  ['TR', 'Türkiye'],
+  ['RU', 'Russia'],
+  ['CN', 'China'],
+  ['JP', 'Japan'],
+  ['KR', 'South Korea'],
+  ['SA', 'Saudi Arabia'],
+];
+
+/** Bing's markets: a language needs a region (its main one when none is chosen). */
+const MAIN_REGION: Record<string, string> = { en: 'US', fr: 'FR', de: 'DE', es: 'ES', it: 'IT', pt: 'BR', nl: 'NL', pl: 'PL', sv: 'SE', tr: 'TR', ru: 'RU', ar: 'SA', hi: 'IN', 'zh-CN': 'CN', ja: 'JP', ko: 'KR' };
+
+/** What a basemap (by its tile or style URL) can be localised by. */
+export function localizationSupport(url: string): { language: boolean; region: boolean } {
+  // Google's maps with labels (not plain satellite imagery): hl= and gl=.
+  if (/mt\d?\.google\.com\/vt\//.test(url)) return /lyrs=s(&|$)/.test(url) ? { language: false, region: false } : { language: true, region: true };
+  // Bing's roads and hybrid imagery (not plain aerial): mkt=language-REGION.
+  if (/virtualearth\.net/.test(url)) return /\/tiles\/a\{q\}/.test(url) ? { language: false, region: false } : { language: true, region: true };
+  // OpenFreeMap's vector styles (OpenMapTiles): labels from name:<language>.
+  if (/openfreemap\.org\/styles\//.test(url)) return { language: true, region: false };
+  return { language: false, region: false };
+}
+
+/** A raster tile URL with the language and region parameters its provider takes. */
+export function localizeUrl(url: string, { language, region }: Localization): string {
+  const add = (params: Record<string, string>) => {
+    const extra = Object.entries(params)
+      .filter(([, v]) => v)
+      .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+      .join('&');
+    // Google's URLs carry their parameters after the path without a '?' (vt/lyrs=m&x=…).
+    return extra ? `${url}${/[?&]/.test(url) ? '&' : '?'}${extra}` : url;
+  };
+  if (/mt\d?\.google\.com\/vt\//.test(url)) return add({ hl: language, gl: region });
+  if (/virtualearth\.net/.test(url) && (language || region)) {
+    const lang = language || 'en';
+    return add({ mkt: `${lang.split('-')[0]}-${region || MAIN_REGION[lang] || 'US'}` });
+  }
+  return url;
+}
+
+/** A MapLibre style whose labels show `language` (OpenMapTiles' name:<language>, else the local name). */
+export function localizeStyle(style: Record<string, unknown>, language: string): Record<string, unknown> {
+  if (!language) return style;
+  const code = language.split('-')[0];
+  for (const layer of (style.layers as { layout?: Record<string, unknown> }[] | undefined) ?? []) {
+    if (layer.layout?.['text-field'] !== undefined) {
+      layer.layout['text-field'] = ['coalesce', ['get', `name:${code}`], ...(code === 'en' ? [['get', 'name_en']] : []), ['get', 'name']];
+    }
+  }
+  return style;
+}
+
 export type FetchBytes = (url: string) => Promise<Uint8Array>;
 export type FetchText = (url: string) => Promise<string>;
 
@@ -28,7 +129,7 @@ type Mesh = Float64Array;
  * Draws `source` (a picture whose mesh points are in image pixels) warped onto
  * the canvas: each mesh cell is drawn with the affine transform of its corners.
  */
-function drawWarped(ctx: CanvasRenderingContext2D, source: CanvasImageSource, width: number, height: number, mesh: Mesh, n: number, view: ViewState): void {
+export function drawWarped(ctx: CanvasRenderingContext2D, source: CanvasImageSource, width: number, height: number, mesh: Mesh, n: number, view: ViewState): void {
   const k = view.scale * view.dpr;
   const ox = view.tx * view.dpr;
   const oy = view.ty * view.dpr;
@@ -368,12 +469,14 @@ export class VectorBasemap implements Basemap {
     private readonly fetchText: FetchText,
     private readonly redraw: () => void,
     private readonly onError: (message: string) => void,
+    /** Language of the labels ('' for the style's own). */
+    private readonly language = '',
   ) {}
 
   private async init(): Promise<maplibregl.Map> {
     if (this.map) return this.map;
     const lib = await loadMapLibre(this.fetchBytes);
-    const style = prepareStyle(JSON.parse(await this.fetchText(this.styleUrl)), this.styleUrl, this.tileUrl);
+    const style = localizeStyle(prepareStyle(JSON.parse(await this.fetchText(this.styleUrl)), this.styleUrl, this.tileUrl), this.language);
     const container = document.createElement('div');
     container.style.cssText = 'position:fixed;left:-100000px;top:0;width:256px;height:256px;pointer-events:none;';
     document.body.append(container);
