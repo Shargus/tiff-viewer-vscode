@@ -1103,3 +1103,209 @@ button:disabled:hover {
 #layersToggle:disabled {
   opacity: 0.5;
 }
+
+/* The Measure split button: the tool, and a triangle opening the choice of measurement. */
+.split-button {
+  display: inline-flex;
+}
+
+.split-button > .status-icon:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.status-icon.split-arrow {
+  width: 10px;
+  min-width: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.status-icon.split-arrow[aria-expanded='true'] {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+  color: var(--vscode-foreground);
+}
+
+.status-icon.wide {
+  width: 34px;
+}
+
+.status-icon[aria-expanded='true'] {
+  border-color: var(--vscode-focusBorder, #0a84ff);
+  color: var(--vscode-foreground);
+}
+
+.measure-menu {
+  width: auto;
+  min-width: 170px;
+}
+
+.measure-choice {
+  grid-template-columns: 16px 1fr;
+  align-items: center;
+}
+
+.measure-choice[aria-checked='true'] {
+  font-weight: 600;
+}
+
+/* OSM place search: suggestions above the search box. */
+.place-search {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 360px;
+}
+
+.place-search[hidden],
+.place-results[hidden],
+.place-status[hidden] {
+  display: none;
+}
+
+.place-results {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(70vh - 80px);
+  overflow: auto;
+}
+
+.place-item {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.place-item:hover,
+.place-item.active {
+  background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground, rgba(128, 128, 128, 0.2)));
+  color: var(--vscode-menu-selectionForeground, inherit);
+}
+
+.place-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.place-detail {
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  overflow-wrap: anywhere;
+}
+
+.place-status {
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+#placeInput {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.place-attribution {
+  padding: 0 2px;
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* The Measure tool: a crosshair on the map, and its panel. */
+#stage.measuring {
+  cursor: crosshair;
+}
+
+#stage.measuring.dragging {
+  cursor: grabbing;
+}
+
+#measure {
+  width: 280px;
+  max-width: 50%;
+  overflow: auto;
+  padding: 4px 12px 12px;
+  border-left: 1px solid var(--vscode-panel-border, transparent);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  user-select: text;
+}
+
+#measure h3 {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+
+#measure .field {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#measure .field[hidden],
+#measure table[hidden] {
+  display: none;
+}
+
+#measure select {
+  min-width: 0;
+}
+
+.measure-segments {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.measure-segments th {
+  font-weight: 600;
+  text-align: left;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border, rgba(128, 128, 128, 0.4));
+}
+
+.measure-segments th:last-child,
+.measure-segments td:last-child {
+  text-align: right;
+}
+
+.measure-segments td {
+  padding: 1px 0;
+}
+
+.measure-segments tr.live {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.measure-results {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  margin: 10px 0 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.measure-results dt {
+  color: var(--vscode-descriptionForeground);
+}
+
+.measure-results dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
+}
+
+#measure .hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}

@@ -32,8 +32,10 @@ import {
 import { drawWarped, LANGUAGES, REGIONS } from './basemap';
 import { toBytes } from './bytes';
 import { GeoMapper } from './geo';
-import { crsKey, crsOfGeo, imageGrid, outlinePath, warpedGrid, windowReference, type CanvasGrid, type Crs, type GridReference } from './grid';
+import { crsKey, crsOfGeo, imageGrid, outlinePath, parseCrs, regionReference, warpedGrid, windowReference, type CanvasGrid, type Crs, type GridReference } from './grid';
 import { Layers, type LayerChoice } from './layers';
+import { MeasureTool } from './measureTool';
+import { PlaceSearch, type Place } from './placeSearch';
 import type { RasterLayer } from './rasterLayer';
 import type {
   FileInfo,
@@ -119,11 +121,18 @@ let worker: Worker | undefined;
 let grid: CanvasGrid | undefined;
 /** The grid's georeferencing as a mapper (pointer → longitude / latitude). */
 let gridMapper: GeoMapper | undefined;
+/** The status bar's Measure tool and OSM place search (set up once the layers are). */
+let measureTool: MeasureTool | undefined;
+let placeSearch: PlaceSearch | undefined;
 let chosenCrs: Crs | undefined;
 /** The opened file's layer was removed (the viewer stays the file's). */
 let imageGone = false;
 /** The opened file is a vector file (it was added as a vector layer). */
 let vectorFile = false;
+/** Opened from the Command Palette: no file, EPSG:4326, unbounded view, over Europe to start. */
+let blank = false;
+/** Where a viewer opened from the Command Palette starts: Europe (lon / lat). */
+const EUROPE: [number, number, number, number] = [-25, 34, 40, 72];
 const EMPTY_MESSAGE = 'No layers. Add them with + Add layer… in the Layers panel.';
 let fileName = '';
 let info: FileInfo | undefined;
@@ -461,7 +470,7 @@ function rebuildGrid(): void {
     if (own) chosenCrs = own;
   } else if (chosenCrs) {
     // Another coordinate system: over the opened file, or over the layers' extent.
-    const reference: GridReference | undefined = page?.geo ? page : (layers.homeReference ?? (grid && windowReference(grid, grid.bounds)));
+    const reference: GridReference | undefined = page?.geo ? page : (layers.dataReference ?? layers.homeReference ?? (grid && windowReference(grid, grid.bounds)));
     try {
       next = reference ? warpedGrid(reference, chosenCrs) : undefined;
     } catch (error) {
@@ -481,6 +490,9 @@ function setGrid(next: CanvasGrid | undefined): void {
   statusCrs.hidden = !grid?.label;
   statusCrs.title = grid?.geo ? `Coordinate system: ${grid.geo.crsName}. Click to change it.` : '';
   layers.setGrid(grid, chosenCrs);
+  // Measurements switch to pixels, or back to metres; places can be searched on a map.
+  measureTool?.refresh();
+  placeSearch?.updateButton();
 }
 
 /** The first layer of an empty viewer: a grid over it, in its coordinate system. */
@@ -490,6 +502,60 @@ function startGrid(reference: GridReference, crs: Crs): void {
   showMessage(undefined);
   fitMode = 'auto';
   layout(0);
+}
+
+/** A viewer opened from the Command Palette: no layers yet, EPSG:4326, unbounded, over Europe. */
+function startBlank(): void {
+  stopWorkers();
+  blank = true;
+  imageGone = true;
+  info = undefined;
+  clearTiles();
+  statusFileSize.textContent = '';
+  statusSize.textContent = '';
+  pageGroup.hidden = true;
+  layers.reset();
+  layers.setPage(undefined, '');
+  const crs = parseCrs('4326') as Crs;
+  const europe = regionReference(crs, EUROPE);
+  startGrid(europe, crs);
+  layers.homeLabel = 'Europe';
+  layers.setHome(europe);
+  layers.forceUnbounded();
+  showProgress(undefined);
+  showMessage(EMPTY_MESSAGE);
+  $('layers').hidden = false;
+  $('layersToggle').setAttribute('aria-pressed', 'true');
+  updateRenderingTarget();
+  layout(0);
+}
+
+/**
+ * The first data layer of a viewer opened from the Command Palette: the grid is laid
+ * out again around it (same coordinate system, at about its resolution), so that
+ * zooming deep into it stays precise. The view stays where it is.
+ */
+function firstLayer(reference: GridReference): void {
+  if (!blank || !grid?.geo || !chosenCrs) return;
+  const old = new GeoMapper(grid.geo);
+  const oldRes = Math.hypot(grid.geo.transform[1], grid.geo.transform[4]);
+  // The view's centre in the coordinate system, and its scale in units per screen pixel.
+  const [cx, cy] = old.pixelToCrs((stage.clientWidth / 2 - view.tx) / view.scale, (stage.clientHeight / 2 - view.ty) / view.scale);
+  const unitsPerPixel = oldRes / view.scale;
+  let next: CanvasGrid;
+  try {
+    next = warpedGrid(reference, chosenCrs);
+  } catch {
+    return;
+  }
+  setGrid(next);
+  const res = Math.hypot(next.geo!.transform[1], next.geo!.transform[4]);
+  const [gx, gy] = new GeoMapper(next.geo!).crsToPixel(cx, cy);
+  view.scale = res / unitsPerPixel;
+  view.tx = stage.clientWidth / 2 - gx * view.scale;
+  view.ty = stage.clientHeight / 2 - gy * view.scale;
+  fitMode = undefined;
+  layout();
 }
 
 /** The viewer of a vector file: no TIFF to decode; the file is its first layer. */
@@ -537,6 +603,13 @@ function imageRemoved(): void {
  * next layer added starts a new canvas, in its coordinate system.
  */
 function allRemoved(): void {
+  if (blank) {
+    // A viewer opened from the Command Palette keeps its canvas (coordinate system, view).
+    showMessage(EMPTY_MESSAGE);
+    updateRenderingTarget();
+    draw();
+    return;
+  }
   chosenCrs = undefined;
   layers.reset();
   setGrid(undefined);
@@ -771,6 +844,12 @@ function layout(delay?: number): void {
   if (fitMode) {
     const s = fitScale();
     view.scale = fitMode === 'auto' ? Math.min(1, s) : s;
+    // Unbounded, nothing keeps the extent in place: fitting centres it.
+    if (grid && layers.unbounded) {
+      const [b0, b1, b2, b3] = grid.bounds;
+      view.tx = (stage.clientWidth - (b2 - b0) * view.scale) / 2 - b0 * view.scale;
+      view.ty = (stage.clientHeight - (b3 - b1) * view.scale) / 2 - b1 * view.scale;
+    }
   }
   clampView();
   updateZoomLabel();
@@ -866,6 +945,8 @@ function draw(): void {
   }
   layers.drawStack(ctx, viewState, () => page && drawImage(page, layered, width, height));
   layers.drawTop(ctx, viewState);
+  drawPlaceMarker(dpr);
+  measureTool?.draw(ctx, dpr);
 }
 
 /** The opened image: straight onto the canvas, or onto its own layer (to go over other layers, be see-through or warped). */
@@ -1161,9 +1242,9 @@ function pointerLonLat(): string {
 }
 
 /**
- * Shows the pixel readout: in the value table when it is on, otherwise in the
- * status bar, for the raster selected in the Layers panel (its pixel and values)
- * and the pointer's longitude / latitude.
+ * Shows the pixel readout. The status bar has the position only: the pixel of the
+ * raster selected in the Layers panel and its longitude / latitude (hidden while the
+ * value table is on). Band and rendered values are only in the value table.
  */
 function renderReadout(): void {
   if (!pointerGrid) {
@@ -1440,7 +1521,10 @@ function toggleInfo(): void {
 // Input
 // ---------------------------------------------------------------------------
 
-let drag: { x: number; y: number; id: number } | undefined;
+/** A press on the map: it pans once moved (at once with the middle button); a left click that barely moves measures. */
+let drag: { x: number; y: number; id: number; startX: number; startY: number; moved: boolean } | undefined;
+/** How far (CSS pixels) the pointer may move for a press to count as a click (the Measure tool). */
+const CLICK_SLOP = 4;
 
 function stagePoint(event: MouseEvent): [number, number] {
   const rect = stage.getBoundingClientRect();
@@ -1464,16 +1548,35 @@ stage.addEventListener(
 );
 
 stage.addEventListener('pointerdown', (event) => {
+  // Right-click undoes the last point (as Backspace).
+  if (event.button === 2 && measureTool?.active) {
+    measureTool.undo();
+    return;
+  }
   if (event.button !== 0 && event.button !== 1) {
     return;
   }
   stage.focus();
-  drag = { x: event.clientX, y: event.clientY, id: event.pointerId };
+  const measuring = event.button === 0 && !!measureTool?.active;
+  drag = { x: event.clientX, y: event.clientY, id: event.pointerId, startX: event.clientX, startY: event.clientY, moved: !measuring };
   stage.setPointerCapture(event.pointerId);
-  stage.classList.add('dragging');
+  if (!measuring) stage.classList.add('dragging');
+});
+
+stage.addEventListener('contextmenu', (event) => {
+  if (measureTool?.active) event.preventDefault();
 });
 
 stage.addEventListener('pointermove', (event) => {
+  if (drag && drag.id === event.pointerId && !drag.moved) {
+    // Measuring: a press only pans once it moves more than a click would.
+    if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < CLICK_SLOP) {
+      updatePointerReadout(event);
+      return;
+    }
+    drag.moved = true;
+    stage.classList.add('dragging');
+  }
   if (drag && drag.id === event.pointerId) {
     view.tx += event.clientX - drag.x;
     view.ty += event.clientY - drag.y;
@@ -1489,8 +1592,13 @@ stage.addEventListener('pointermove', (event) => {
 
 const endDrag = (event: PointerEvent) => {
   if (drag && drag.id === event.pointerId) {
+    const click = !drag.moved && event.type === 'pointerup';
     drag = undefined;
     stage.classList.remove('dragging');
+    if (click && measureTool?.active && grid) {
+      const [sx, sy] = stagePoint(event);
+      measureTool.click((sx - view.tx) / view.scale, (sy - view.ty) / view.scale, sx, sy);
+    }
   }
 };
 stage.addEventListener('pointerup', endDrag);
@@ -1509,9 +1617,15 @@ stage.addEventListener('pointerleave', () => {
   pointerGrid = undefined;
   layers.readPixels(undefined);
   renderReadout();
+  measureTool?.move(undefined, undefined);
 });
 
 stage.addEventListener('dblclick', (event) => {
+  // Measuring: a double-click finishes the measurement (it does not zoom).
+  if (measureTool?.active) {
+    measureTool.finish();
+    return;
+  }
   const [x, y] = stagePoint(event);
   if (Math.abs(view.scale - Math.min(1, fitScale())) < 1e-6 || fitMode) {
     zoomTo(view.scale < 1 ? 1 : view.scale * 2, x, y);
@@ -1528,6 +1642,8 @@ function updatePointerReadout(event: MouseEvent): void {
   // Grid pixels, then each raster's pixel there.
   const gx = (px - view.tx) / view.scale;
   const gy = (py - view.ty) / view.scale;
+  // The measurement follows the pointer.
+  measureTool?.move(gx, gy);
   pointer = { x: event.clientX, y: event.clientY };
   const [b0, b1, b2, b3] = grid.bounds;
   if (!layers.unbounded && !(gx >= b0 && gy >= b1 && gx < b2 && gy < b3)) {
@@ -1620,6 +1736,26 @@ document.addEventListener('keydown', (event) => {
       if (mod || !layers.available) handled = false;
       else layers.toggleTicks();
       break;
+    case 'r':
+    case 'R':
+      // The Measure tool, on or off.
+      if (mod || !measureTool || !grid) handled = false;
+      else measureTool.setOn(!measureTool.active);
+      break;
+    case 's':
+    case 'S':
+      if (mod || !grid) handled = false;
+      else takeScreenshot();
+      break;
+    case 'Backspace':
+    case 'Delete':
+      // The last point measured.
+      handled = !mod && !!measureTool?.undo();
+      break;
+    case 'Escape':
+      // Start the measurement over; or hide the place found.
+      handled = !!measureTool?.clear() || clearPlaceMarker();
+      break;
     default:
       handled = false;
   }
@@ -1686,6 +1822,8 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('.panel-close'
   button.addEventListener('click', () => {
     const panel = button.closest('aside')!;
     if (panel.id === 'composite') return showComposite(false);
+    // Closing the Measure panel turns the tool off.
+    if (panel.id === 'measure') return measureTool?.setOn(false);
     panel.hidden = true;
     $(button.dataset.toggle!).setAttribute('aria-pressed', 'false');
   });
@@ -2986,19 +3124,7 @@ $('openSettings').addEventListener('click', (event) => {
 const layers = new Layers({
   post: (message) => vscode.postMessage(message),
   redraw: () => draw(),
-  showWindow: (window) => {
-    if (!grid) return;
-    // Bounded: within the canvas's extent; unbounded: wherever the layer is.
-    const [b0, b1, b2, b3] = layers.unbounded ? [-Infinity, -Infinity, Infinity, Infinity] : grid.bounds;
-    const [x0, y0, x1, y1] = [Math.max(b0, window[0]), Math.max(b1, window[1]), Math.min(b2, window[2]), Math.min(b3, window[3])];
-    const w = Math.max(1, x1 - x0);
-    const h = Math.max(1, y1 - y0);
-    view.scale = Math.min(maxScale(), Math.max(minScale(), 0.9 * Math.min(stage.clientWidth / w, stage.clientHeight / h)));
-    view.tx = stage.clientWidth / 2 - ((x0 + x1) / 2) * view.scale;
-    view.ty = stage.clientHeight / 2 - ((y0 + y1) / 2) * view.scale;
-    fitMode = undefined;
-    layout();
-  },
+  showWindow,
   // Added rasters decode in their own worker, without helpers (the opened image keeps those).
   createWorker: (onMessage) => createWorker(onMessage, 0),
   rasterAdded,
@@ -3015,10 +3141,13 @@ const layers = new Layers({
     layout(0);
   },
   startGrid,
+  firstLayer,
   imageRemoved,
   allRemoved,
   layersChanged: () => {
     updateRenderingTarget();
+    // Layers came: the "No layers" hint goes.
+    if (layers.count && messageBox.textContent === EMPTY_MESSAGE) showMessage(undefined);
     // Bounded again after zooming out over the world: back to the map's extent.
     if (!layers.unbounded && view.scale < minScale() * 0.999) {
       setFit('auto');
@@ -3041,6 +3170,162 @@ const layers = new Layers({
 });
 
 // ---------------------------------------------------------------------------
+// Measure, OSM place search, screenshot (the status bar's tools)
+// ---------------------------------------------------------------------------
+
+/** Units of the map's coordinate system: metres per unit, or undefined (degrees, unknown units). */
+function crsUnits(): { symbol: string; metres: number | undefined } | undefined {
+  const geo = grid?.geo;
+  if (!geo || !gridMapper) return undefined;
+  const def = geo.proj4;
+  if (geo.geographic || /\+proj=longlat\b/.test(def)) return { symbol: '°', metres: undefined };
+  const toMeter = /\+to_meter=([\d.eE+-]+)/.exec(def);
+  if (toMeter) return { symbol: 'map units', metres: Number(toMeter[1]) };
+  const units = /\+units=([\w-]+)/.exec(def)?.[1] ?? 'm';
+  const known: Record<string, number> = { m: 1, km: 1000, cm: 0.01, ft: 0.3048, 'us-ft': 1200 / 3937, yd: 0.9144, mi: 1609.344 };
+  return { symbol: units, metres: known[units] };
+}
+
+measureTool = new MeasureTool({
+  toLonLat: (gx, gy) => gridMapper?.pixelToLonLat(gx, gy),
+  toGrid: (lon, lat) => gridMapper ? gridMapper.lonLatToPixel(lon, lat) : [NaN, NaN],
+  toCrs: (gx, gy) => {
+    if (!gridMapper || !grid?.geo) return undefined;
+    const [x, y] = gridMapper.pixelToCrs(gx, gy);
+    return [x * grid.geo.factors.x, y * grid.geo.factors.y];
+  },
+  crsUnits,
+  gridToStage: (gx, gy) => [view.tx + gx * view.scale, view.ty + gy * view.scale],
+  redraw: () => draw(),
+  activeChanged: (on) => stage.classList.toggle('measuring', on),
+});
+
+/** Shows a window of the canvas grid: within the canvas's extent when bounded, wherever it is when unbounded. */
+function showWindow(window: PixelWindow): void {
+  if (!grid) return;
+  const [b0, b1, b2, b3] = layers.unbounded ? [-Infinity, -Infinity, Infinity, Infinity] : grid.bounds;
+  const [x0, y0, x1, y1] = [Math.max(b0, window[0]), Math.max(b1, window[1]), Math.min(b2, window[2]), Math.min(b3, window[3])];
+  const w = Math.max(1, x1 - x0);
+  const h = Math.max(1, y1 - y0);
+  view.scale = Math.min(maxScale(), Math.max(minScale(), 0.9 * Math.min(stage.clientWidth / w, stage.clientHeight / h)));
+  view.tx = stage.clientWidth / 2 - ((x0 + x1) / 2) * view.scale;
+  view.ty = stage.clientHeight / 2 - ((y0 + y1) / 2) * view.scale;
+  fitMode = undefined;
+  layout();
+}
+
+/** The canvas grid window covering a lon/lat box (its edges sampled: the grid may be warped). */
+function lonLatToWindow(box: [number, number, number, number]): PixelWindow | undefined {
+  if (!gridMapper) return undefined;
+  const [w, s, e, n] = box;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i <= 16; i++) {
+    const t = i / 16;
+    for (const [lon, lat] of [[w + (e - w) * t, s], [w + (e - w) * t, n], [w, s + (n - s) * t], [e, s + (n - s) * t]]) {
+      const [x, y] = gridMapper.lonLatToPixel(lon, lat);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+    }
+  }
+  return x0 <= x1 && y0 <= y1 ? [x0, y0, x1, y1] : undefined;
+}
+
+/** The lon/lat box of the bounded map (its outline sampled). */
+function boundsLonLat(): [number, number, number, number] | undefined {
+  if (!grid || !gridMapper) return undefined;
+  const [b0, b1, b2, b3] = grid.bounds;
+  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+  for (let i = 0; i <= 16; i++) {
+    const t = i / 16;
+    for (const [x, y] of [[b0 + (b2 - b0) * t, b1], [b0 + (b2 - b0) * t, b3], [b0, b1 + (b3 - b1) * t], [b2, b1 + (b3 - b1) * t]]) {
+      const [lon, lat] = gridMapper.pixelToLonLat(x, y);
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+      w = Math.min(w, lon); s = Math.min(s, lat); e = Math.max(e, lon); n = Math.max(n, lat);
+    }
+  }
+  return w <= e && s <= n ? [w, s, e, n] : undefined;
+}
+
+/** The place found last, marked on the map until Esc or the next search. */
+let placeMarker: Place | undefined;
+
+function clearPlaceMarker(): boolean {
+  if (!placeMarker) return false;
+  placeMarker = undefined;
+  draw();
+  return true;
+}
+
+/** A pin on the place found. */
+function drawPlaceMarker(dpr: number): void {
+  if (!placeMarker || !gridMapper) return;
+  const [gx, gy] = gridMapper.lonLatToPixel(placeMarker.lon, placeMarker.lat);
+  const x = view.tx + gx * view.scale;
+  const y = view.ty + gy * view.scale;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const pin = new Path2D();
+  pin.moveTo(x, y);
+  pin.bezierCurveTo(x - 2, y - 7, x - 9, y - 11, x - 9, y - 18);
+  pin.arc(x, y - 18, 9, Math.PI, 0);
+  pin.bezierCurveTo(x + 9, y - 11, x + 2, y - 7, x, y);
+  pin.closePath();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
+  ctx.shadowBlur = 4;
+  ctx.fillStyle = '#e31a1c';
+  ctx.fill(pin);
+  ctx.shadowColor = 'transparent';
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#fff';
+  ctx.stroke(pin);
+  ctx.beginPath();
+  ctx.arc(x, y - 18, 3.5, 0, 2 * Math.PI);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.restore();
+}
+
+placeSearch = new PlaceSearch({
+  fetchText: (url) => layers.fetchUrl(url),
+  available: () => !!gridMapper,
+  limit: () => (layers.unbounded ? undefined : boundsLonLat()),
+  inside: (lon, lat) => {
+    if (layers.unbounded) return true;
+    if (!grid || !gridMapper) return false;
+    const [x, y] = gridMapper.lonLatToPixel(lon, lat);
+    const [b0, b1, b2, b3] = grid.bounds;
+    return x >= b0 && y >= b1 && x <= b2 && y <= b3;
+  },
+  show: (place) => {
+    // The place's extent, at least about 300 m across (a point: about 1 km).
+    const half = place.extent ? 150 : 500;
+    const dLat = half / 111320;
+    const dLon = dLat / Math.max(0.01, Math.cos((place.lat * Math.PI) / 180));
+    const [w, s, e, n] = place.extent ?? [place.lon, place.lat, place.lon, place.lat];
+    const box: [number, number, number, number] = [Math.min(w, place.lon - dLon), Math.min(s, place.lat - dLat), Math.max(e, place.lon + dLon), Math.max(n, place.lat + dLat)];
+    placeMarker = place;
+    const window = lonLatToWindow(box);
+    if (window) showWindow(window);
+    else draw();
+  },
+});
+$('placeSearchToggle').addEventListener('click', () => clearPlaceMarker());
+placeSearch.updateButton();
+
+/** Saves the view (the map as drawn, with measurements and markers) as a PNG, where the user chooses. */
+function takeScreenshot(): void {
+  if (!grid || !canvas.width || !canvas.height) return;
+  const data = canvas.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+  const stem = (fileName.replace(/\.[^.]+$/, '') || 'TIFF Viewer VS Code').replace(/[\\/:*?"<>|]/g, '_');
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  vscode.postMessage({ type: 'saveScreenshot', data, name: `${stem} ${stamp}.png` });
+}
+$('screenshotButton').addEventListener('click', takeScreenshot);
+
+// ---------------------------------------------------------------------------
 // Extension host messages
 // ---------------------------------------------------------------------------
 
@@ -3052,8 +3337,13 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
       fileName = message.fileName;
       userPresets = message.presets;
       remembered = message.remembered;
-      if (message.vector) startVector(message.vector, message.fileSize);
+      if (placeSearch) placeSearch.language = message.placeLanguage || 'en';
+      if (message.blank) startBlank();
+      else if (message.vector) startVector(message.vector, message.fileSize);
       else void start(message.fileSize);
+      break;
+    case 'placeLanguage':
+      if (placeSearch) placeSearch.language = message.language || 'en';
       break;
     case 'colorMapLoaded':
       onColorMapLoaded(message.text, message.fileName);
@@ -3067,7 +3357,7 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
       break;
     case 'reload':
       // The file changed on disk: show it again, unless its layer was removed.
-      if (!imageGone && !vectorFile) void start(message.fileSize);
+      if (!imageGone && !vectorFile && !blank) void start(message.fileSize);
       break;
     case 'readResult': {
       const buffers = message.data.map(toBytes).map((chunk) =>

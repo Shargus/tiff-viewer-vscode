@@ -105,6 +105,7 @@ class TiffDocument implements vscode.CustomDocument {
 
 export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<TiffDocument> {
   static readonly viewType = 'tiffViewer.viewer';
+  static readonly blankViewType = 'tiffViewer.blank';
   /** The same viewer for vector files: never their default editor, offered by "Open With…". */
   static readonly vectorViewTypes = ['tiffViewer.vector'];
 
@@ -116,6 +117,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       webviewOptions: { retainContextWhenHidden: true },
     };
     return vscode.Disposable.from(
+      vscode.commands.registerCommand('tiffViewer.open', () => provider.openBlank()),
       ...[TiffEditorProvider.viewType, ...TiffEditorProvider.vectorViewTypes].map((viewType) => vscode.window.registerCustomEditorProvider(viewType, provider, options)),
     );
   }
@@ -133,12 +135,23 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
     return document;
   }
 
+  /**
+   * The command "Open TIFF Viewer VS Code": a viewer with no file, for georeferenced
+   * data (a plain panel: its tab names no file). The viewer itself is the same.
+   */
+  openBlank(): vscode.WebviewPanel {
+    const panel = vscode.window.createWebviewPanel(TiffEditorProvider.blankViewType, 'TIFF Viewer VS Code', vscode.ViewColumn.Active, { retainContextWhenHidden: true });
+    panel.iconPath = vscode.Uri.joinPath(this.extensionUri, 'images', 'icon.png');
+    this.attach(panel, undefined);
+    return panel;
+  }
+
   async resolveCustomEditor(document: TiffDocument, panel: vscode.WebviewPanel): Promise<void> {
     this.attach(panel, document);
   }
 
   /** Runs the viewer of `document` in `panel`. */
-  private attach(panel: vscode.WebviewPanel, document: TiffDocument): void {
+  private attach(panel: vscode.WebviewPanel, document: TiffDocument | undefined): void {
     const webview = panel.webview;
     webview.options = {
       enableScripts: true,
@@ -150,34 +163,41 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
     webview.html = this.getHtml(webview);
 
     const post = (message: HostToWebview) => webview.postMessage(message);
-    const fileName = document.uri.path.slice(document.uri.path.lastIndexOf('/') + 1);
+    const fileName = document ? document.uri.path.slice(document.uri.path.lastIndexOf('/') + 1) : '';
     // A vector file: the viewer starts with it as its layer (read like any vector layer).
-    const vector = !/\.(tiff?|btf|tf8|tf2)$/i.test(fileName);
-    const rememberKey = `selection:${document.uri.toString()}`;
+    const vector = !!document && !/\.(tiff?|btf|tf8|tf2)$/i.test(fileName);
+    const rememberKey = document ? `selection:${document.uri.toString()}` : undefined;
     /** Where relative paths start, and dialogs open. */
-    const base = overlayBase(document.uri);
-    const folder = vscode.Uri.joinPath(document.uri, '..');
+    const base = overlayBase(document?.uri);
+    const folder = document ? vscode.Uri.joinPath(document.uri, '..') : base;
 
     const disposables: vscode.Disposable[] = [];
+    disposables.push(
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration('tiffViewer.placeSearch.language')) void post({ type: 'placeLanguage', language: placeLanguage() });
+      }),
+    );
     /** Raster layers added in this viewer, by id. */
     const rasters = new Map<number, TiffDocument>();
     disposables.push(
       webview.onDidReceiveMessage(async (message: WebviewToHost) => {
         switch (message.type) {
           case 'ready':
-            await Promise.all([document.open().catch(() => undefined), this.presets.init()]);
+            await Promise.all([document?.open().catch(() => undefined), this.presets.init()]);
             void post({
               type: 'init',
               fileName,
-              fileSize: document.size,
-              vector: vector ? document.uri.toString() : undefined,
+              fileSize: document?.size ?? 0,
+              vector: vector && document ? document.uri.toString() : undefined,
+              blank: !document,
               presets: this.presets.get(),
-              remembered: this.state.get<Selection>(rememberKey),
+              remembered: rememberKey ? this.state.get<Selection>(rememberKey) : undefined,
+              placeLanguage: placeLanguage(),
             });
             break;
           case 'remember':
             // Only explicit choices are sent, so a choice of the plain image also overrides auto-apply rules.
-            void this.state.update(rememberKey, message.selection);
+            if (rememberKey) void this.state.update(rememberKey, message.selection);
             break;
           case 'savePreset': {
             const name = await savePreset(this.presets, message.preset, message.bandCount, message.fileName ?? fileName);
@@ -268,6 +288,26 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
             }
             break;
           }
+          case 'saveScreenshot': {
+            const uri = await vscode.window.showSaveDialog({
+              title: 'Save Screenshot',
+              defaultUri: vscode.Uri.joinPath(folder, message.name),
+              filters: { 'PNG images': ['png'] },
+            });
+            if (uri) {
+              const target = /\.png$/i.test(uri.path) ? uri : uri.with({ path: `${uri.path}.png` });
+              try {
+                await vscode.workspace.fs.writeFile(target, Buffer.from(message.data, 'base64'));
+                const name = target.path.slice(target.path.lastIndexOf('/') + 1);
+                void vscode.window.showInformationMessage(`Screenshot saved: ${name}`, 'Open').then((choice) => {
+                  if (choice === 'Open') void vscode.commands.executeCommand('vscode.open', target, { viewColumn: vscode.ViewColumn.Beside });
+                });
+              } catch (error) {
+                void vscode.window.showErrorMessage(`Could not write ${target.fsPath}: ${(error as Error).message ?? error}`);
+              }
+            }
+            break;
+          }
           case 'exportColorMap': {
             const uri = await vscode.window.showSaveDialog({
               title: 'Export Colour Map to File',
@@ -297,7 +337,7 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
           }
         }
       }),
-      document.onDidChange(() => void post({ type: 'reload', fileSize: document.size })),
+      ...(document ? [document.onDidChange(() => void post({ type: 'reload', fileSize: document.size }))] : []),
       // Edits of the presets file, by hand or from another viewer or window.
       this.presets.onDidChange((presets) => void post({ type: 'presets', presets })),
     );
@@ -479,6 +519,16 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <button class="panel-close" data-toggle="infoToggle" title="Close" aria-label="Close panel">×</button>
       <div id="infoContent"></div>
     </aside>
+    <div class="panel-resizer" data-panel="measure" role="separator" aria-orientation="vertical" title="Drag to resize the panel (double-click: default width)"></div>
+    <aside id="measure" class="panel" hidden>
+      <button class="panel-close" data-toggle="measureToggle" title="Close" aria-label="Close panel">×</button>
+      <h3 id="measureTitle">Measure line</h3>
+      <div class="field" id="measureMethodRow"><span>Method</span><select id="measureMethod" title="Ellipsoidal: along geodesics on the WGS 84 ellipsoid. Cartesian: on the plane of the map's coordinate system."><option value="ellipsoidal">Ellipsoidal (WGS 84)</option><option value="cartesian">Cartesian (map CRS)</option></select></div>
+      <div class="field"><span>Units</span><select id="measureUnits"></select></div>
+      <table id="measureSegments" class="measure-segments"><thead><tr><th>#</th><th>Segment</th></tr></thead><tbody></tbody></table>
+      <dl id="measureResults" class="measure-results"></dl>
+      <p class="hint" id="measureHint"></p>
+    </aside>
   </div>
   <div id="status">
     <span id="statusSize"></span>
@@ -486,12 +536,25 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
       <button id="unboundedToggle" class="status-icon" aria-pressed="false" title="Unbounded view: pan over the whole world and add layers anywhere (off: the view is bounded by the extent of the file the viewer was opened on) (U)" aria-label="Unbounded view"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><ellipse cx="8" cy="8" rx="2.6" ry="6.2"/><path d="M1.8 8h12.4M2.9 4.6h10.2M2.9 11.4h10.2"/></svg></button>
       <button id="ticksToggle" class="status-icon" aria-pressed="false" title="Show coordinates &amp; scale: ticks along the borders, a grid at the ticks, and a scale bar (G)" aria-label="Show coordinates and scale"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="1.8" width="12.4" height="12.4" rx="0.8"/><path d="M5.9 1.8v12.4M10.1 1.8v12.4M1.8 5.9h12.4M1.8 10.1h12.4"/></svg></button>
       <button id="valuesToggle" class="status-icon" aria-pressed="false" title="Show band and rendered values on hovering, in a table next to the pointer (Space)" aria-label="Show band and rendered values on hovering"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5.3" y="1.6" width="9.2" height="7.6" rx="1"/><path d="M7 4h5.6M7 6.6h5.6M9.6 1.6v7.6"/><path d="M1.6 7.4l1.9 7.2 1.4-2.6 2.7 2.4 1-1.1-2.6-2.4 2.9-.8z" fill="currentColor" stroke-width="0.6"/></svg></button>
+      <span class="split-button">
+        <button id="measureToggle" class="status-icon" aria-pressed="false" title="Measure line (R)" aria-label="Measure line"></button>
+        <button id="measureMenuButton" class="status-icon split-arrow" aria-haspopup="menu" aria-expanded="false" title="Choose what to measure: line, area or angle" aria-label="Choose what to measure"><svg viewBox="0 0 6 16" width="6" height="16" aria-hidden="true" focusable="false"><path d="M0.5 6.8h5L3 9.8z" fill="currentColor"/></svg></button>
+      </span>
+      <button id="placeSearchToggle" class="status-icon wide" aria-haspopup="dialog" aria-expanded="false" title="OSM place search: find a place by name (OpenStreetMap)" aria-label="OSM place search"><svg viewBox="0 0 28 16" width="28" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><text x="0.2" y="11.4" fill="currentColor" stroke="none" font-family="sans-serif" font-size="7.4" font-weight="700" letter-spacing="-0.2">OSM</text><circle cx="21.4" cy="6.9" r="3.5"/><path d="M24 9.5l2.8 2.8"/></svg></button>
+      <button id="screenshotButton" class="status-icon" title="Take screenshot: save the view as a PNG image (S)" aria-label="Take screenshot"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M2 4.8h2.6L5.9 3h4.2l1.3 1.8H14a.9.9 0 0 1 .9.9v6.6a.9.9 0 0 1-.9.9H2a.9.9 0 0 1-.9-.9V5.7a.9.9 0 0 1 .9-.9z"/><circle cx="8" cy="8.9" r="2.6"/></svg></button>
     </span>
     <span id="statusPos"></span>
     <span class="spacer"></span>
     <span id="statusProgress"></span>
     <button id="statusCrs" class="status-button" hidden aria-haspopup="menu" aria-expanded="false"></button>
     <span id="statusFileSize" title="File size"></span>
+  </div>
+  <div id="measureMenu" class="crs-menu measure-menu" role="menu" aria-label="Measure" hidden></div>
+  <div id="placeSearch" class="crs-menu place-search" role="dialog" aria-label="OSM place search" hidden>
+    <div id="placeResults" class="place-results" role="listbox" aria-label="Places" hidden></div>
+    <div id="placeStatus" class="place-status" role="status" hidden></div>
+    <input type="search" id="placeInput" placeholder="Place name, then Enter" spellcheck="false" autocomplete="off" role="combobox" aria-controls="placeResults" aria-label="Place name">
+    <div class="place-attribution">Search by Nominatim · Data © OpenStreetMap contributors</div>
   </div>
   <div id="crsMenu" class="crs-menu" role="menu" hidden>
     <div id="crsChoices" class="crs-choices"></div>
@@ -506,6 +569,11 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
 </body>
 </html>`;
   }
+}
+
+/** The OSM place search's language: the setting, or VS Code's display language. */
+function placeLanguage(): string {
+  return vscode.workspace.getConfiguration('tiffViewer').get<string>('placeSearch.language')?.trim() || vscode.env.language || 'en';
 }
 
 /**
@@ -627,8 +695,12 @@ function resolveLayerPath(base: vscode.Uri, path: string): vscode.Uri {
  * The folder relative overlay paths start from: the workspace folder holding
  * the image, else the first workspace folder, else the image's folder.
  */
-function overlayBase(image: vscode.Uri): vscode.Uri {
-  return vscode.workspace.getWorkspaceFolder(image)?.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.joinPath(image, '..');
+function overlayBase(image: vscode.Uri | undefined): vscode.Uri {
+  return (
+    (image && vscode.workspace.getWorkspaceFolder(image)?.uri) ??
+    vscode.workspace.workspaceFolders?.[0]?.uri ??
+    (image ? vscode.Uri.joinPath(image, '..') : vscode.Uri.file(os.homedir()))
+  );
 }
 
 /**

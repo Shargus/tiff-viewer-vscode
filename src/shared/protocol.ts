@@ -57,7 +57,13 @@ export type HostToWebview =
       remembered?: Selection;
       /** The file is a vector file (its URI): it is the viewer's first layer. */
       vector?: string;
+      /** Opened from the Command Palette: no file, georeferenced data only, unbounded view. */
+      blank?: boolean;
+      /** Language of the OSM place search (e.g. "it"). */
+      placeLanguage: string;
     }
+  /** The OSM place search's language setting changed. */
+  | { type: 'placeLanguage'; language: string }
   | { type: 'presets'; presets: Preset[]; select?: string }
   | { type: 'colorMapLoaded'; text: string; fileName: string }
   /** Answer to 'fetch': the body as bytes or text, or why it failed. */
@@ -84,6 +90,8 @@ export type WebviewToHost =
   | { type: 'deletePreset'; name: string }
   | { type: 'remember'; selection: Selection }
   | { type: 'openPresetsFile' }
+  /** Save a screenshot of the view: a PNG, base64-encoded, under a name the user chooses (`name` is the suggestion). */
+  | { type: 'saveScreenshot'; data: string; name: string }
   /** Asks for a colour map file (QGIS format) to load; answered with 'colorMapLoaded'. */
   | { type: 'loadColorMap' }
   /** Asks where to save a colour map file, and writes `text` there. */

@@ -56,6 +56,18 @@
     "virtualWorkspaces": true
   },
   "contributes": {
+    "configuration": {
+      "title": "TIFF Viewer VS Code",
+      "properties": {
+        "tiffViewer.placeSearch.language": {
+          "type": "string",
+          "default": "",
+          "pattern": "^([a-zA-Z]{2,3}(-[a-zA-Z0-9]+)*)?$",
+          "patternErrorMessage": "A language code, such as it, en or de",
+          "markdownDescription": "Language of the **OSM place search** (a code such as `it`, `en` or `de`): Nominatim names places in it, and it changes which places are found and their order. QGIS's OSM place search plugin uses the language of QGIS. Empty: VS Code's display language."
+        }
+      }
+    },
     "customEditors": [
       {
         "viewType": "tiffViewer.viewer",
@@ -139,6 +151,11 @@
     ],
     "commands": [
       {
+        "command": "tiffViewer.open",
+        "title": "Open TIFF Viewer VS Code",
+        "category": "TIFF"
+      },
+      {
         "command": "tiffViewer.openPresets",
         "title": "Open Rendering Presets File",
         "category": "TIFF"
@@ -149,7 +166,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc -p . --noEmit && tsc -p src/webview --noEmit",
-    "test": "npm run build && node test/decode.test.mjs && node test/composite.test.mjs && node test/presetStore.test.mjs && node test/overlays.test.mjs",
+    "test": "npm run build && node test/decode.test.mjs && node test/composite.test.mjs && node test/presetStore.test.mjs && node test/overlays.test.mjs && node test/measure.test.mjs",
     "vscode:prepublish": "npm run typecheck && node esbuild.mjs --production",
     "package": "vsce package",
     "publish:vsce": "vsce publish",
@@ -161,6 +178,7 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.28.2",
+    "geographiclib-geodesic": "^2.2.0",
     "geotiff": "^3.0.5",
     "geotiff-geokeys-to-proj4": "^2026.11.15",
     "jsonc-parser": "^3.3.1",

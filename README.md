@@ -1,8 +1,8 @@
 # TIFF Viewer VS Code
 
-View **TIFF**, **BigTIFF** and **GeoTIFF** images directly in VS Code, including files far larger than memory, with band composites for multi-band imagery (e.g. satellite imagery).
+View **TIFF**, **BigTIFF** and - *most importantly* - **GeoTIFF** images directly in VS Code, including files far larger than memory, with band composites for multi-band imagery. The majority of features are **specifically designed for working with GeoTIFFs** (e.g. satellite imagery).
 
-This extension is built on [**TIFF/BigTIFF**](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), which provides the viewer at its core: the fast, on-demand rendering of huge TIFF and BigTIFF files. TIFF Viewer VS Code started as a fork of it and adds tools for working with GeoTIFFs. See [Credits](#credits).
+This extension is built on [**TIFF/BigTIFF**](https://github.com/kiu-chan/tiff-bigtiff) by [kiu-chan](https://github.com/kiu-chan), which provides the viewer at its core: the fast, on-demand rendering of huge TIFF and BigTIFF files. TIFF Viewer VS Code started as a fork of it and adds tools for working with GeoTIFFs (loosely inspired by [QGIS](https://www.qgis.org/)). See [Credits](#credits).
 
 Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the viewer.
 
@@ -22,6 +22,9 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 - **Layers**, as in QGIS: GeoTIFFs (each with its own rendering), vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips) and online basemaps (raster, vector tiles and WMTS), added with **+ Add layer…** and **+ Add basemap…**, reordered, hidden and made see-through; everything drawn in one coordinate system (a layer's, or any EPSG code); coordinate ticks and a scale bar. Vector files can be opened in the viewer too (**Open With…**).
 - **Pixel readout**: the status bar shows the pixel under the cursor (and, for a GeoTIFF, the longitude and latitude of its centre, and the coordinate system). Press <kbd>Space</kbd>, or the status bar's values button, to show the band values and the rendered values in a table next to the cursor, and again to hide it: each band by its name in the file (or b1…bN, if no names are available). The values follow the cursor as it moves.
 - **Status bar buttons**, next to the image's size: **Unbounded view** (globe; <kbd>U</kbd>), **Show coordinates & scale** (grid; <kbd>G</kbd>) and **Show band and rendered values on hovering** (pointer and table; <kbd>Space</kbd>). The first two need georeferenced layers.
+- **Measure**, as QGIS's measure tools: the status bar's ruler button (<kbd>R</kbd>) measures lines (each segment and the total), areas (and perimeters; a self-intersecting polygon counts every part it encloses, as it is filled on the map) or angles, chosen from its ▾ menu. Click on the map to add points and double-click to finish (an angle finishes at its third point); right-click or <kbd>Backspace</kbd> removes the last point, and <kbd>Esc</kbd> starts over. Results are shown in the Measure panel, in the units you choose: *Ellipsoidal* (along geodesics on the WGS 84 ellipsoid, as QGIS does by default) or *Cartesian* (on the plane of the map's coordinate system). Images without georeferencing are measured in pixels.
+- **OSM place search**, as QGIS's *OSM Place Search* plugin: type a place name in the box above the status bar's **OSM** button and press <kbd>Enter</kbd> (or type a space after at least four characters, as in the plugin's locator), then choose a place to go there. While the view is bounded, only places within the map's extent are listed. Places come from [Nominatim](https://nominatim.org), OpenStreetMap's search, asked as the plugin asks it, with data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors; what you search for is sent to it. Nominatim's [usage policy](https://operations.osmfoundation.org/policies/nominatim/) allows no searching at every keystroke and one search a second. Places are named, found and ordered in the language of the `tiffViewer.placeSearch.language` setting (e.g. `it`; empty: VS Code's display language): set it to QGIS's language to get the same places as the plugin.
+- **Screenshots**: the status bar's camera button (<kbd>S</kbd>) saves the view as a PNG image (layers, basemaps, ticks, measurements), where and under the name you choose.
 - **Info panel**: format, byte order, dimensions, bit depth, compression, tiling, pyramid levels, GDAL metadata items (as `gdalinfo` shows them), GeoTIFF keys, and every TIFF tag, including private and custom ones (by number). Long values expand on click.
 - Reloads automatically when the file changes on disk.
 
@@ -42,6 +45,12 @@ Open any `.tif`, `.tiff`, `.btf`, `.tf8` or `.tf2` file and it opens in the view
 | Coordinates & scale (GeoTIFFs, on / off) | Grid button in the status bar | <kbd>G</kbd> |
 | Unbounded view (GeoTIFFs, on / off) | Globe button in the status bar | <kbd>U</kbd> |
 | Coordinate system (GeoTIFFs) | Click it in the status bar | |
+| Measure tool (on / off; ▾: line, area or angle) | Ruler button in the status bar | <kbd>R</kbd> |
+| Add a measured point / finish | Click / double-click | |
+| Remove the last measured point | Right-click | <kbd>Backspace</kbd> |
+| Start the measurement over | | <kbd>Esc</kbd> |
+| OSM place search (GeoTIFFs) | **OSM** button in the status bar | |
+| Take a screenshot | Camera button in the status bar | <kbd>S</kbd> |
 
 ## Band composites and presets
 
@@ -172,6 +181,8 @@ Useful trick: the SCL can also mask other renderings, since band names work in a
 
 Vector files (GeoJSON, KML, KMZ, Shapefile, GeoPackage, zips of them) can be opened in the viewer too: right-click the file and choose **Open With… → TIFF Viewer (vector layer)** (it is never their default editor). The file is then the first layer, and rasters, other vectors and basemaps can be added to it.
 
+The command **TIFF: Open TIFF Viewer VS Code** (Command Palette) opens a viewer without a file, for georeferenced data: it starts in EPSG:4326 over Europe, its view is always unbounded, and TIFFs without georeferencing cannot be added to it. Its coordinate system can be changed as in any viewer, and removing every layer keeps its canvas.
+
 ## Using another editor for TIFF files
 
 This viewer is registered as the default editor for TIFF files. To open a file with something else, right-click it and choose **Open With…**. To change the default, use the `workbench.editorAssociations` setting.
@@ -213,6 +224,7 @@ git push --follow-tags
 - `src/webview/worker.ts`: a Web Worker that parses and decodes the TIFF with [geotiff.js](https://github.com/geotiffjs/geotiff.js), using a block-cached byte-range source (`messageSource.ts`). A few helper workers (same script) decompress tiles in parallel (`decodePool.ts`).
 - `src/webview/lzw.ts`: fast TIFF LZW decoder (Deflate uses the platform's `DecompressionStream`).
 - `src/webview/layers.ts`, `rasterLayer.ts`, `grid.ts`, `basemap.ts`, `tilegrid.ts`, `geo.ts`, `vectors.ts`, `georef.ts`: the Layers panel; raster layers (each with its own decoder worker); the canvas grid in the chosen coordinate system; basemaps warped into it; XYZ and WMTS tile grids; projections (proj4); vector file reading; the GeoTIFF's georeferencing.
+- `src/shared/measure.ts`, `src/webview/measureTool.ts`, `placeSearch.ts`: the Measure tool (geodesic lengths, areas and angles with GeographicLib) and the OSM place search (Nominatim).
 - `src/presetStore.ts`: the presets file in `~/.tiff-viewer-vscode` (created, watched, and edited in place with `jsonc-parser`).
 - `src/shared/expression.ts`, `presets.ts`, `colormaps.ts`, `src/webview/composite.ts`: band math (parsed and evaluated over whole tiles, since the webview forbids `eval`), presets, and composite colouring.
 - `src/webview/tiff.ts`: page/pyramid discovery, chunked region reading with box-filter or nearest-neighbour downsampling, and colour conversion.
@@ -240,7 +252,7 @@ Added in TIFF Viewer VS Code:
 
 Both use [geotiff.js](https://github.com/geotiffjs/geotiff.js) to parse and decode TIFF files.
 
-The basemaps offered in the Layers panel are the selection of Fan Chengyan's [Basemaps](https://github.com/Fanchengyan/Basemaps) QGIS plugin. Layers use [proj4js](https://github.com/proj4js/proj4js), [geotiff-geokeys-to-proj4](https://github.com/matafokka/geotiff-geokeys-to-proj4), [MapLibre GL JS](https://maplibre.org/), [shapefile-js](https://github.com/calvinmetcalf/shapefile-js), [togeojson](https://github.com/placemark/togeojson), [JSZip](https://stuk.github.io/jszip/) and [sql.js](https://sql.js.org/). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licences.
+The basemaps offered in the Layers panel are the selection of Fan Chengyan's [Basemaps](https://github.com/Fanchengyan/Basemaps) QGIS plugin. Layers use [proj4js](https://github.com/proj4js/proj4js), [geotiff-geokeys-to-proj4](https://github.com/matafokka/geotiff-geokeys-to-proj4), [MapLibre GL JS](https://maplibre.org/), [shapefile-js](https://github.com/calvinmetcalf/shapefile-js), [togeojson](https://github.com/placemark/togeojson), [JSZip](https://stuk.github.io/jszip/) and [sql.js](https://sql.js.org/); measurements use Charles Karney's [GeographicLib](https://geographiclib.sourceforge.io/), and the OSM place search [Nominatim](https://nominatim.org). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for their licences.
 
 ## License
 

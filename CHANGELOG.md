@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- **Measure** (status bar, <kbd>R</kbd>), as in QGIS: lines, areas and angles, chosen from the button's ▾ menu, with the results in a Measure panel. Ellipsoidal (WGS 84 geodesics) or Cartesian; in pixels for images without georeferencing.
+- **OSM place search** (status bar), as QGIS's OSM place search plugin: Nominatim's places for what you type (on <kbd>Enter</kbd>, or a space after four characters), limited to the map's extent while the view is bounded; choosing one goes there and marks it. Its language is the new `tiffViewer.placeSearch.language` setting (default: VS Code's display language).
+- **Take screenshot** (status bar, <kbd>S</kbd>): saves the view as a PNG image.
+- **TIFF: Open TIFF Viewer VS Code** (Command Palette): a viewer without a file, for georeferenced data, in EPSG:4326 over Europe, always in unbounded view. Opening TIFF and vector files is unchanged.
+
 ## 0.6.0
 
 - **Layers**, as in QGIS (the Layers panel replaces Overlays): GeoTIFFs (**R**), vector layers (**V**) and online basemaps (**B**) in one list, with **+ Add layer…** and **+ Add basemap…**. Drag **⠿** to reorder, click it to select a layer; each layer has its visibility, opacity, *zoom to layer* and remove. The TIFF the viewer was opened on is a layer like the others; removing every layer leaves an empty canvas, ready for new layers. Files with several layers (KML folders, GeoPackage tables, zips) ask which to load.

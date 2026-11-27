@@ -37,6 +37,8 @@ export interface LayersHost {
   setCrs(crs: Crs): void;
   /** The first layer of an empty viewer: start a grid over `reference`, in `crs`. */
   startGrid(reference: GridReference, crs: Crs): void;
+  /** The first data layer on a canvas that already has a grid (a viewer opened from the Command Palette). */
+  firstLayer(reference: GridReference): void;
   /** The opened file's layer was removed. */
   imageRemoved(): void;
   /** No layer is left. */
@@ -240,6 +242,11 @@ export class Layers {
     return result.text;
   };
 
+  /** Text from the web, fetched by the extension host (the OSM place search). */
+  fetchUrl(url: string): Promise<string> {
+    return this.fetchText(url);
+  }
+
   /** Bytes of a raster layer's file, read by the extension host. */
   private readHost(file: number, ranges: ByteRange[]): Promise<Uint8Array[]> {
     const id = this.nextId++;
@@ -330,6 +337,11 @@ export class Layers {
     }
     $('unboundedToggle').setAttribute('aria-pressed', String(this.unbounded));
     $('ticksToggle').setAttribute('aria-pressed', String(this.ticks && on));
+    if (this.unboundedForced) {
+      const globe = $<HTMLButtonElement>('unboundedToggle');
+      globe.disabled = true;
+      globe.title = 'Unbounded view: always on in a viewer opened from the Command Palette';
+    }
   }
 
   /** The canvas's extent: the union of the layers' extents. */
@@ -384,7 +396,25 @@ export class Layers {
     if (this.gridMapper) this.setUnbounded(!this.unboundedMap);
   }
 
+  /** The region of the first data layer (a grid laid out again is laid out around it). */
+  dataReference: GridReference | undefined;
+
+  /** Rasters or vector layers (not only basemaps). */
+  private hasData(): boolean {
+    return this.entries.some((e) => e.kind !== 'basemap');
+  }
+
+  /** Always unbounded (a viewer opened from the Command Palette): the toggle is off duty. */
+  private unboundedForced = false;
+
+  forceUnbounded(): void {
+    this.unboundedForced = true;
+    this.unboundedMap = true;
+    this.updateMapButtons();
+  }
+
   private setUnbounded(on: boolean): void {
+    if (this.unboundedForced) on = true;
     this.unboundedMap = on;
     $('unboundedToggle').setAttribute('aria-pressed', String(this.unbounded));
     // Bounded again: layers outside the extent are greyed out in the list.
@@ -878,8 +908,9 @@ export class Layers {
   private addVectorData(datasets: VectorData[]): string[] {
     const refused: string[] = [];
     for (const data of datasets) {
-      if (!this.grid) {
-        // The first layer of an empty viewer: the canvas starts in its coordinate system, around it.
+      if (!this.grid || !this.hasData()) {
+        // The first layer of an empty canvas: the canvas starts in its coordinate system, around it
+        // (or, on a canvas already set up, it is laid out around it: see LayersHost.firstLayer).
         const crs = !data.crs ? (parseCrs('4326') as Crs) : data.crs.epsg ? parseCrs(String(data.crs.epsg)) : { proj4: data.crs.proj4, geographic: /\+proj=longlat\b/.test(data.crs.proj4), name: 'Custom (from the file)' };
         const box = dataBounds(data);
         if (typeof crs === 'string' || !box) {
@@ -887,10 +918,15 @@ export class Layers {
           continue;
         }
         const reference = regionReference(crs, box);
-        this.host.startGrid(reference, crs);
-        // The first layer of an empty canvas bounds the map.
-        this.homeLabel = data.name;
-        this.setHome(reference);
+        this.dataReference = reference;
+        if (this.grid) {
+          this.host.firstLayer(reference);
+        } else {
+          this.host.startGrid(reference, crs);
+          // The first layer of an empty canvas bounds the map.
+          this.homeLabel = data.name;
+          this.setHome(reference);
+        }
       }
       const layer: VectorLayer = {
         id: nextVectorId++,
@@ -968,6 +1004,9 @@ export class Layers {
         // The first layer of an empty canvas bounds the map.
         this.homeLabel = name;
         this.setHome(page);
+      } else if (!this.hasData()) {
+        this.dataReference = page;
+        this.host.firstLayer(page);
       }
       const mapping = pixelMapping(page.geo, this.grid?.geo);
       const extent = mapping && extentInCanvas(page, mapping);
@@ -1173,6 +1212,7 @@ export class Layers {
     this.target = undefined;
     this.home = undefined;
     this.homeLabel = '';
+    this.dataReference = undefined;
     this.grid = undefined;
     this.gridMapper = undefined;
     this.gridCrs = undefined;
