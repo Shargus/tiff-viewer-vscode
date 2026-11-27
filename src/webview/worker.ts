@@ -1,6 +1,6 @@
 import type { CompositeSpec } from '../shared/presets';
 import type { ByteRange, MainToWorker, TileSpec, ToneMode, WorkerToMain } from '../shared/protocol';
-import { channelStats, compileComposite, compositeSamples, compositeToRGBA, needsStats, type ChannelStats } from './composite';
+import { channelRanges, channelStats, compileComposite, compositeKey, compositeSamples, compositeToRGBA, needsStats, type ChannelStats } from './composite';
 import type { Range } from '../shared/presets';
 import { MAX_CLASSES } from '../shared/palette';
 import { DecodePool, serveDecodes } from './decodePool';
@@ -16,6 +16,7 @@ import {
   readPixel,
   readRegion,
   toRGBA,
+  toneRange,
   type OpenedTiff,
   type RegionResult,
 } from './tiff';
@@ -265,6 +266,11 @@ function channelPut(key: string, value: Float32Array[]): void {
   }
 }
 
+/** The 'ranges' key of a plain (greyscale) page, followed by its index and tone. */
+const PLAIN_RANGES = 'plain';
+/** Composites whose ranges were sent (see 'ranges'). */
+const rangesSent = new Set<string>();
+
 async function renderTile(job: Job): Promise<void> {
   const { spec, generation } = job;
   const tiff = await opened!;
@@ -281,6 +287,21 @@ async function renderTile(job: Job): Promise<void> {
   const stats = composite ? await ensureCompositeStats(tiff, job.page, composite) : await ensureStats(tiff, job.page);
   const { outWidth, outHeight } = spec;
   const fullRange = typeRange(page);
+  // The ranges shown, once per composite: the legend's values.
+  if (composite) {
+    const key = compositeKey(composite);
+    if (!rangesSent.has(key)) {
+      rangesSent.add(key);
+      post({ type: 'ranges', key, ranges: channelRanges(composite, stats || undefined, fullRange) });
+    }
+  } else if (page.kind === 'gray') {
+    // A plain single band image: shown in grey from the low end of its stretch (black) to the high end.
+    const key = `${PLAIN_RANGES}|${job.page}|${job.tone}`;
+    if (!rangesSent.has(key)) {
+      rangesSent.add(key);
+      post({ type: 'ranges', key, ranges: [toneRange(page, job.tone, page.stats)], inverted: page.whiteIsZero });
+    }
+  }
   const post_ = (rgba: Uint8ClampedArray, final: boolean) =>
     post(
       { type: 'tile', generation, id: spec.id, width: outWidth, height: outHeight, rgba: rgba.buffer as ArrayBuffer, final },

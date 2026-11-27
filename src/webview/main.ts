@@ -27,8 +27,10 @@ import {
   type AutoStretch,
   type CompositeSpec,
   type Preset,
+  type Range,
   type RangeSetting,
 } from '../shared/presets';
+import { channelRanges, compositeKey, compositeToRGBA } from './composite';
 import { drawWarped, LANGUAGES, REGIONS } from './basemap';
 import { toBytes } from './bytes';
 import { GeoMapper } from './geo';
@@ -124,6 +126,16 @@ let gridMapper: GeoMapper | undefined;
 /** The status bar's Measure tool and OSM place search (set up once the layers are). */
 let measureTool: MeasureTool | undefined;
 let placeSearch: PlaceSearch | undefined;
+/** Legends: the opened image's key (raster layers are their own keys). */
+const IMAGE_LEGEND = {};
+/** Rasters whose legend is hidden or shown (the Rendering panel's "Show legend"; on by default). */
+const legendOn = new WeakMap<object, boolean>();
+const legendShown = (key: object) => legendOn.get(key) ?? true;
+/** Each raster's legend size, in % (100 by default). */
+const legendSizes = new WeakMap<object, number>();
+const legendScale = (key: object) => (legendSizes.get(key) ?? 100) / 100;
+/** The ranges each raster's composites are shown with, as its worker resolved them (by compositeKey). */
+const shownRanges = new WeakMap<object, Map<string, { ranges: Range[]; inverted?: boolean }>>();
 let chosenCrs: Crs | undefined;
 /** The opened file's layer was removed (the viewer stays the file's). */
 let imageGone = false;
@@ -322,6 +334,9 @@ async function onWorkerMessage(message: WorkerToMain): Promise<void> {
           showMessage(message.message);
         }
       }
+      break;
+    case 'ranges':
+      storeRanges(IMAGE_LEGEND, message.key, message.ranges, message.inverted);
       break;
     case 'classifyProgress':
     case 'classified':
@@ -945,6 +960,7 @@ function draw(): void {
   }
   layers.drawStack(ctx, viewState, () => page && drawImage(page, layered, width, height));
   layers.drawTop(ctx, viewState);
+  drawLegends(dpr);
   drawPlaceMarker(dpr);
   measureTool?.draw(ctx, dpr);
 }
@@ -1983,6 +1999,7 @@ function selectTarget(layer: RasterLayer | undefined): void {
   if (!page) return;
   loadRenderState(layer ? (layer.renderState as RenderState | undefined) : imageRenderState, page, targetName());
   if (!layer) imageRenderState = undefined;
+  updateLegendRow();
 }
 
 function choiceValue(choice: LayerChoice): string {
@@ -2149,15 +2166,26 @@ function initialSelection(page: PageInfo, name: string, useRemembered = true): S
   return match ? { kind: 'preset', name: match.name } : { kind: 'none' };
 }
 
-/** A starting point for a new composite: the first three bands, or the first band, by their names in the file. */
+/**
+ * A single band of 8-bit integers (uint8 or int8), without a colour table: classes
+ * or masks, more likely than measurements. It starts paletted, in grey.
+ */
+function isByteBand(page: PageInfo): boolean {
+  return page.samplesPerPixel === 1 && page.bitsPerSample[0] === 8 && /^(Unsigned|Signed) integer$/.test(page.sampleFormat) && !page.palette;
+}
+
+/**
+ * A starting point for a new composite: the first three bands, or the first band
+ * (paletted for 8-bit integers), by their names in the file.
+ */
 function defaultPreset(page: PageInfo): Preset {
   const name = (i: number) => {
     const description = page.bandNames[i];
     return (description && bandIdentifierOf(description)) || `b${i + 1}`;
   };
-  return page.samplesPerPixel >= 3
-    ? { name: '', red: name(0), green: name(1), blue: name(2), range: 'auto' }
-    : { name: '', value: name(0), range: 'auto', colormap: 'gray' };
+  if (page.samplesPerPixel >= 3) return { name: '', red: name(0), green: name(1), blue: name(2), range: 'auto' };
+  if (isByteBand(page)) return { name: '', paletted: name(0), colorRamp: 'gray' };
+  return { name: '', value: name(0), range: 'auto', colormap: 'gray' };
 }
 
 /** Shows `next` (a preset, an unsaved composite or the plain image) and fills the editor with it. */
@@ -2172,10 +2200,19 @@ function applySelection(next: Selection, remember: boolean): void {
     preset = next.preset;
   }
   selection = next;
-  if (preset || !panelFilled) {
-    // Choosing the plain image keeps the panel as it is, so that custom settings stay at hand.
+  // A preset, or the default rendering: the panel shows it, with its own variables only
+  // (nothing kept from what was shown before, in any mode).
+  const refill = !!preset || !panelFilled || next.kind === 'none';
+  if (refill) {
     editing = structuredClone(preset ?? defaultPreset(page));
     fillEditor();
+    for (const key of Object.keys(modeStates) as Mode[]) if (key !== currentMode) delete modeStates[key];
+  }
+  // An 8-bit band shown by default: paletted, its values classified and coloured in grey.
+  if (refill && !preset && isByteBand(page)) {
+    queueMicrotask(() => {
+      if (targetPage() === page && !classifyRequest && !paletteRows.length) paletteClassify.click();
+    });
   }
   updatePresetSelect();
   // What is shown is remembered for the opened image (by the extension host), not for added layers.
@@ -2316,6 +2353,7 @@ function setMode(mode: Mode): void {
   paletteBox.hidden = mode !== 'paletted';
   rangeHint.hidden = mode === 'paletted';
   channelsBox.classList.toggle('paletted', mode === 'paletted');
+  updateLegendRow();
 }
 
 function captureState(): PanelState {
@@ -3130,7 +3168,8 @@ const layers = new Layers({
   rasterAdded,
   rasterRemoved,
   rasterMessage: (layer, message) => {
-    if (layer === target) onClassifyMessage(message);
+    if (message.type === 'ranges') storeRanges(layer, message.key, message.ranges, message.inverted);
+    else if (layer === target) onClassifyMessage(message);
   },
   rasterPixel: () => renderReadout(),
   selectTarget,
@@ -3168,6 +3207,238 @@ const layers = new Layers({
     else openRendering(choice.kind === 'raster' ? choice.layer : undefined, false);
   },
 });
+
+// ---------------------------------------------------------------------------
+// Legends of single band and paletted rasters, at the lower right of the map
+// ---------------------------------------------------------------------------
+
+const legendRow = $<HTMLLabelElement>('legendRow');
+const legendToggle = $<HTMLInputElement>('legendToggle');
+const legendSize = $<HTMLInputElement>('legendSize');
+
+/** The raster the Rendering panel edits, as a legend key. */
+function legendTarget(): object {
+  return target ?? IMAGE_LEGEND;
+}
+
+/** "Show legend" in the Rendering panel: for single band and paletted rendering. */
+function updateLegendRow(): void {
+  legendRow.hidden = currentMode === 'rgb';
+  legendToggle.checked = legendShown(legendTarget());
+  legendSize.value = String(Math.round(legendScale(legendTarget()) * 100));
+  legendSize.disabled = !legendToggle.checked;
+}
+legendToggle.addEventListener('change', () => {
+  legendOn.set(legendTarget(), legendToggle.checked);
+  legendSize.disabled = !legendToggle.checked;
+  draw();
+});
+legendSize.addEventListener('input', () => {
+  const size = Number(legendSize.value);
+  if (!Number.isFinite(size) || size < 50 || size > 300) return;
+  legendSizes.set(legendTarget(), size);
+  draw();
+});
+legendSize.addEventListener('change', () => {
+  // Out of range: back to the nearest allowed size.
+  const size = Math.min(300, Math.max(50, Number(legendSize.value) || 100));
+  legendSize.value = String(size);
+  legendSizes.set(legendTarget(), size);
+  draw();
+});
+
+function storeRanges(key: object, composite: string, ranges: Range[], inverted?: boolean): void {
+  let map = shownRanges.get(key);
+  if (!map) shownRanges.set(key, (map = new Map()));
+  if (map.size > 64) map.clear();
+  map.set(composite, { ranges, inverted });
+  if (legendShown(key)) draw();
+}
+
+interface LegendSource {
+  key: object;
+  name: string;
+  /** The composite shown; undefined for a plain single band image (in grey). */
+  spec: CompositeSpec | undefined;
+  /** A plain single band image's stretch (black to white), as its worker reported it. */
+  plain?: { ranges: Range[]; inverted?: boolean };
+  /** Where the raster lies, in grid pixels. */
+  extent: PixelWindow | undefined;
+}
+
+/** The rasters whose legend shows: asked for, single band or paletted, visible and (partly) in view; top first. */
+function legendSources(): LegendSource[] {
+  if (!grid) return [];
+  // The view, in grid pixels (within the map's extent while it is bounded).
+  let [v0, v1, v2, v3] = [-view.tx / view.scale, -view.ty / view.scale, (stage.clientWidth - view.tx) / view.scale, (stage.clientHeight - view.ty) / view.scale];
+  if (!layers.unbounded) [v0, v1, v2, v3] = [Math.max(v0, grid.bounds[0]), Math.max(v1, grid.bounds[1]), Math.min(v2, grid.bounds[2]), Math.min(v3, grid.bounds[3])];
+  const inView = (e: PixelWindow | undefined) => !!e && e[0] < v2 && e[2] > v0 && e[1] < v3 && e[3] > v1;
+  const out: LegendSource[] = [];
+  for (const shown of layers.shownRasters()) {
+    const key = shown.kind === 'image' ? IMAGE_LEGEND : shown.layer;
+    const spec = shown.kind === 'image' ? composite : shown.layer.composite;
+    // Without a composite: a single band image is shown in grey (its worker reports how it is stretched).
+    const plain = spec ? undefined : shownRanges.get(key)?.get(`plain|${shown.kind === 'image' ? pageIndex : 0}|minmax`);
+    if (shown.kind === 'image' && !currentPage()) continue;
+    if (!spec && !plain) continue;
+    const source: LegendSource =
+      shown.kind === 'image'
+        ? { key, name: fileName, spec, plain, extent: grid.imageBounds }
+        : { key, name: shown.layer.name, spec, plain, extent: shown.layer.extent };
+    if (!legendShown(source.key)) continue;
+    if (spec && !spec.classes && spec.expressions.length !== 1) continue;
+    if (inView(source.extent)) out.push(source);
+  }
+  return out;
+}
+
+/** Text cut to a width, with an ellipsis. */
+function fitText(text: string, width: number): string {
+  if (ctx.measureText(text).width <= width) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(text.slice(0, mid) + '…').width <= width) lo = mid;
+    else hi = mid - 1;
+  }
+  return text.slice(0, lo) + '…';
+}
+
+const LEGEND_MAX_CLASSES = 20;
+const LEGEND_FONT = '11px sans-serif';
+const LEGEND_TITLE_FONT = '600 11px sans-serif';
+
+/** A legend's size and how to draw it at (x, y), in CSS pixels; undefined until its values are known. */
+function legendBox(source: LegendSource, titled: boolean): { width: number; height: number; draw: (x: number, y: number) => void } | undefined {
+  const { spec } = source;
+  const pad = 8;
+  const titleHeight = titled ? 16 : 0;
+  ctx.font = LEGEND_TITLE_FONT;
+  const title = titled ? fitText(source.name, 200) : '';
+  const titleWidth = titled ? ctx.measureText(title).width : 0;
+  ctx.font = LEGEND_FONT;
+  const frame = (x: number, y: number, width: number, height: number) => {
+    ctx.beginPath();
+    ctx.roundRect(x, y, width, height, 4);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.88)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    if (titled) {
+      ctx.font = LEGEND_TITLE_FONT;
+      ctx.fillStyle = '#222';
+      ctx.textBaseline = 'top';
+      ctx.fillText(title, x + pad, y + pad);
+      ctx.font = LEGEND_FONT;
+    }
+  };
+  const swatch = (rgba: Uint8ClampedArray, i: number) => `rgba(${rgba[i * 4]}, ${rgba[i * 4 + 1]}, ${rgba[i * 4 + 2]}, ${rgba[i * 4 + 3] / 255})`;
+
+  if (spec?.classes) {
+    // Paletted: each class's colour and label.
+    const classes = spec.classes.slice(0, LEGEND_MAX_CLASSES);
+    const more = spec.classes.length - classes.length;
+    const colours = compositeToRGBA(spec, [Float32Array.from(classes, (c) => c.value)], classes.length, undefined);
+    const labels = classes.map((c) => fitText(c.label || formatNumber(c.value), 220));
+    if (more > 0) labels.push(`+ ${more} more`);
+    const rowHeight = 16;
+    const width = Math.ceil(Math.max(titleWidth, 14 + 6 + Math.max(0, ...labels.map((l) => ctx.measureText(l).width)))) + 2 * pad;
+    const height = pad * 2 + titleHeight + labels.length * rowHeight - 4;
+    return {
+      width,
+      height,
+      draw: (x, y) => {
+        frame(x, y, width, height);
+        ctx.textBaseline = 'middle';
+        labels.forEach((label, i) => {
+          const top = y + pad + titleHeight + i * rowHeight;
+          if (i < classes.length) {
+            ctx.fillStyle = swatch(colours, i);
+            ctx.fillRect(x + pad, top, 14, 12);
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+            ctx.strokeRect(x + pad + 0.5, top + 0.5, 13, 11);
+          }
+          ctx.fillStyle = i < classes.length ? '#222' : '#666';
+          ctx.fillText(label, x + pad + (i < classes.length ? 20 : 0), top + 6);
+        });
+      },
+    };
+  }
+
+  // Single band: the colour map from the highest value shown (top) to the lowest.
+  const ranges = !spec ? source.plain?.ranges : spec.ranges.every((r) => Array.isArray(r)) ? channelRanges(spec, undefined) : shownRanges.get(source.key)?.get(compositeKey(spec))?.ranges;
+  const range = ranges?.[0];
+  if (!range) return undefined;
+  const [lo, hi] = range;
+  const steps = 100;
+  const values = Float32Array.from({ length: steps }, (_, i) => hi + ((lo - hi) * i) / (steps - 1));
+  let colours: Uint8ClampedArray;
+  if (spec) colours = compositeToRGBA({ ...spec, ranges: [range] }, [values], steps, undefined);
+  else {
+    // Grey: black at the low end, white at the high end (the other way round for WhiteIsZero images).
+    colours = new Uint8ClampedArray(steps * 4);
+    values.forEach((v, i) => {
+      let t = hi > lo ? (v - lo) / (hi - lo) : 0.5;
+      if (source.plain?.inverted) t = 1 - t;
+      colours.fill(Math.round(t * 255), i * 4, i * 4 + 3);
+      colours[i * 4 + 3] = 255;
+    });
+  }
+  const labels = [hi, (lo + hi) / 2, lo].map((v) => formatNumber(Number(v.toPrecision(4))));
+  const barHeight = 120;
+  const width = Math.ceil(Math.max(titleWidth, 16 + 6 + Math.max(...labels.map((l) => ctx.measureText(l).width)))) + 2 * pad;
+  const height = pad * 2 + titleHeight + barHeight + 6;
+  return {
+    width,
+    height,
+    draw: (x, y) => {
+      frame(x, y, width, height);
+      const top = y + pad + titleHeight + 3;
+      for (let i = 0; i < steps; i++) {
+        ctx.fillStyle = swatch(colours, i);
+        const y0 = top + (barHeight * i) / steps;
+        ctx.fillRect(x + pad, y0, 16, barHeight / steps + 0.5);
+      }
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.strokeRect(x + pad + 0.5, top + 0.5, 15, barHeight - 1);
+      ctx.fillStyle = '#222';
+      labels.forEach((label, i) => {
+        ctx.textBaseline = i === 0 ? 'top' : i === 1 ? 'middle' : 'bottom';
+        ctx.fillText(label, x + pad + 22, top + (barHeight * i) / 2 + (i === 0 ? -1 : i === 2 ? 1 : 0));
+      });
+    },
+  };
+}
+
+/** The legends, side by side from the lower right corner of the map (the top layer's rightmost). */
+function drawLegends(dpr: number): void {
+  const sources = legendSources();
+  if (!sources.length) return;
+  // With several, each is titled with its file's name.
+  const titled = sources.length > 1;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  let right = stage.clientWidth - 10;
+  // Above the coordinate labels along the lower border, when they are shown.
+  const bottom = stage.clientHeight - (layers.ticksShown ? 28 : 10);
+  for (const source of sources) {
+    const box = legendBox(source, titled);
+    if (!box) continue;
+    // Each at its own size: drawn at 100%, scaled.
+    const k = legendScale(source.key);
+    const x = right - box.width * k;
+    if (x < 4) break;
+    ctx.save();
+    ctx.translate(x, Math.max(4, bottom - box.height * k));
+    ctx.scale(k, k);
+    box.draw(0, 0);
+    ctx.restore();
+    right = x - 8;
+  }
+  ctx.restore();
+}
 
 // ---------------------------------------------------------------------------
 // Measure, OSM place search, screenshot (the status bar's tools)

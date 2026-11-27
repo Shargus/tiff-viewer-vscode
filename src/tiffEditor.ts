@@ -420,6 +420,10 @@ export class TiffEditorProvider implements vscode.CustomReadonlyEditorProvider<T
         <label><input type="radio" name="mode" value="single"> Single band</label>
         <label title="Paletted / unique values, as in QGIS: a colour for each value"><input type="radio" name="mode" value="paletted"> Paletted</label>
       </div>
+      <div class="legend-toggle" id="legendRow" hidden>
+        <label title="A legend at the lower right of the map, while the raster is in view"><input type="checkbox" id="legendToggle"> Show legend</label>
+        <label class="legend-size" title="Size of the legend (%)">Size <input type="number" id="legendSize" min="50" max="300" step="10" value="100" aria-label="Legend size (%)"> %</label>
+      </div>
       <div id="channels" class="channels">
         <span></span><span class="col">Expression</span><span class="col col-range">Min</span><span class="col col-range">Max</span>
       </div>

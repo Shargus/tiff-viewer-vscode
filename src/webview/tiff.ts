@@ -1200,7 +1200,7 @@ export function computeStats(page: Page, data: Sample[]): Stats {
   return { min: sorted[0], max: sorted[sorted.length - 1], p02: at(0.02), p98: at(0.98) };
 }
 
-function toneRange(page: Page, tone: ToneMode, stats_: Stats | undefined): [number, number] {
+export function toneRange(page: Page, tone: ToneMode, stats_: Stats | undefined): [number, number] {
   const { bits, format } = page;
   if (!page.info.toneAdjustable) {
     // Unsigned integers of 8 bits or less (1, 2, 4, 8 ...).

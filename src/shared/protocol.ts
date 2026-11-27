@@ -8,7 +8,7 @@
  * webview relays the request to the extension host, which reads the file.
  */
 
-import type { CompositeSpec, Preset } from './presets';
+import type { CompositeSpec, Preset, Range } from './presets';
 
 export interface ByteRange {
   offset: number;
@@ -209,6 +209,8 @@ export type MainToWorker =
   | { type: 'cancelClassify'; reqId: number };
 
 export type WorkerToMain =
+  /** The value ranges a composite is shown with (automatic stretches resolved), for its legend; `key` is compositeKey(composite). */
+  | { type: 'ranges'; key: string; ranges: Range[]; inverted?: boolean }
   | { type: 'read'; id: number; ranges: ByteRange[] }
   | { type: 'opened'; info: FileInfo }
   | { type: 'openError'; message: string }

@@ -64,9 +64,15 @@ Each channel's **min** and **max** are the values shown respectively as black an
 
 **Brightness**, **contrast**, **saturation** and **gamma** work as in QGIS's raster symbology: brightness from −255 to 255, contrast and saturation from −100 to 100 (0: unchanged; saturation −100: grey), gamma from 0.1 to 10 (1: unchanged; above 1 brightens dark tones).
 
+### Legend
+
+A raster shown as **Single band** or **Paletted** gets a legend at the lower right of the map: its colour map with the values at its ends and middle, or its classes' colours and labels. It is drawn while the raster is visible and at least partly in view, and appears in screenshots. **Show legend** in the Rendering panel turns it off or on for each raster, and **Size** scales it (50–300%). When several legends are shown, each is titled with its file's name.
+
 ### Paletted / unique values
 
 Like QGIS's *Paletted/Unique values* renderer: each value listed in the table gets its colour, opacity and label; NoData and values not listed are transparent. Values are taken as they are when zoomed out, never averaged.
+
+A single band of 8-bit integers (uint8 or int8) without a colour table opens paletted: its values are classified, and coloured with the *gray* ramp.
 
 - **Classify** lists every value of the band (or expression) over the whole image. A paletted rendering has at most 256 classes: Classify stops when it finds more (continuous data suits Single band better), and loading a colour table or file with more keeps the first 256. Values already in the table keep their colour and label; new ones get colours from the **Colour ramp** (*Random colors*, as in QGIS, or a colour map).
 - **+** adds a value (the next whole number), **−** deletes the selected classes, **Delete all** empties the table.

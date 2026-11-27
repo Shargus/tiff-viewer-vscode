@@ -495,6 +495,20 @@ export class Layers {
     return [...this.entries].reverse().flatMap((e): RasterChoice[] => (e.kind === 'image' ? [{ kind: 'image', name: this.imageName }] : e.kind === 'raster' ? [{ kind: 'raster', layer: e.layer }] : []));
   }
 
+  /** Whether the coordinate ticks are shown. */
+  get ticksShown(): boolean {
+    return this.ticks && this.available;
+  }
+
+  /** The rasters shown (visible, and within the map's extent while it is bounded), top first: for their legends. */
+  shownRasters(): ({ kind: 'image' } | { kind: 'raster'; layer: RasterLayer })[] {
+    return [...this.entries].reverse().flatMap((e): ({ kind: 'image' } | { kind: 'raster'; layer: RasterLayer })[] => {
+      if (e.kind === 'image') return this.visibleEntry(e) ? [{ kind: 'image' }] : [];
+      if (e.kind === 'raster' && this.available && this.visibleEntry(e) && !this.outside(e)) return [{ kind: 'raster', layer: e.layer }];
+      return [];
+    });
+  }
+
   /** Shows or hides the coordinate ticks, grid and scale bar (the button, and the G key). */
   toggleTicks(): void {
     if (!this.available) return;

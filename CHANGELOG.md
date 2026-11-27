@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- **Legends** for rasters shown as single band (the colour map and its values) or paletted (the classes), at the lower right of the map while the raster is in view; **Show legend** (on by default) and **Size** in the Rendering panel. Several legends are titled with their files' names.
+- A plain single band image has a legend too (its grey stretch).
+- Single band 8-bit images (uint8 and int8, without a colour table) open **paletted**: their values classified and coloured with the *gray* ramp.
+- Choosing **Default** in the Preset menu shows the default rendering in the Rendering panel: a preset's variables and expressions no longer stay behind.
+
 ## 0.7.0
 
 - **Measure** (status bar, <kbd>R</kbd>), as in QGIS: lines, areas and angles, chosen from the button's ▾ menu, with the results in a Measure panel. Ellipsoidal (WGS 84 geodesics) or Cartesian; in pixels for images without georeferencing.
