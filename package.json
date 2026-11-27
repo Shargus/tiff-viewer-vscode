@@ -2,7 +2,7 @@
   "name": "tiff-viewer-vscode",
   "displayName": "TIFF Viewer VS Code",
   "description": "View TIFF and GeoTIFF images in VS Code, including files far larger than memory. Supports custom band composites!",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "shargus",
   "author": {
     "name": "Shargus"
